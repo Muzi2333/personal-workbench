@@ -354,9 +354,12 @@
       render();
     });
 
-    // 撤销上限输入框：宽度跟随内容长度变化
+    // 撤销上限输入框：宽度跟随内容长度变化（ch 计字符 + 固定 16px 内边距）
     const undoInput = el.grid.querySelector('#st-undo');
-    const fitUndo = (inp) => { inp.style.width = Math.max(3, String(inp.value).length + 2) + 'ch'; };
+    const fitUndo = (inp) => {
+      const n = Math.max(2, String(inp.value).length + 2);
+      inp.style.width = 'calc(' + n + 'ch + 16px)';
+    };
     fitUndo(undoInput);
     undoInput.addEventListener('input', () => fitUndo(undoInput));
     undoInput.addEventListener('change', (e) => {
