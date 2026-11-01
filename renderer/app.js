@@ -181,10 +181,10 @@
 
     data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true }, data.settings || {});
     data.iconCache = data.iconCache || {};
-    // 图标缓存版本：.lnk 图标提取修复后，清掉旧版缓存的快捷方式通用图标，强制重新提取
-    if (data.cacheVer !== 2) {
-      Object.keys(data.iconCache).forEach((k) => { if (/\.lnk$/i.test(k)) delete data.iconCache[k]; });
-      data.cacheVer = 2;
+    // 图标缓存版本：图标升级为 256px 高清提取，清掉全部旧缓存强制重取
+    if (data.cacheVer !== 3) {
+      data.iconCache = {};
+      data.cacheVer = 3;
     }
     return data;
   }
@@ -1448,6 +1448,13 @@
     search.addEventListener('blur', () => { if (!search.value) toggleSearch(false); });
 
     // 宫格事件（委托，重渲染后依然有效）
+    // 双击行/列标题：重命名与外观
+    el.grid.addEventListener('dblclick', (e) => {
+      const head = e.target.closest('[data-axis]');
+      if (!head) return;
+      openHeaderDialog(head.dataset.axis, head.dataset.id);
+    });
+
     el.grid.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
 

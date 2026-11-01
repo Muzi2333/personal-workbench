@@ -1,7 +1,8 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const os = require('os');
+const { spawn, execFile } = require('child_process');
 
 let win = null;
 let tray = null;
@@ -49,11 +50,14 @@ function createTray() {
 }
 
 function createWindow() {
+  // 目标最小/默认尺寸按物理像素思考，换算成 DIP：高缩放屏幕上 DIP 偏小才能缩到预期大小
+  const sf = (screen.getPrimaryDisplay() && screen.getPrimaryDisplay().scaleFactor) || 1;
+  const work = screen.getPrimaryDisplay().workAreaSize;
   win = new BrowserWindow({
-    width: 1400,
-    height: 920,
-    minWidth: 800,
-    minHeight: 600,
+    width: Math.min(Math.round(1400 / Math.max(sf, 1)), work.width),
+    height: Math.min(Math.round(920 / Math.max(sf, 1)), work.height),
+    minWidth: Math.round(800 / sf),
+    minHeight: Math.round(600 / sf),
     frame: false,
     show: false,
     backgroundColor: '#1a1b1c',
@@ -291,6 +295,28 @@ ipcMain.handle('target:launch', async (_e, payload) => {
   }
 });
 
+// 高清图标：调 PowerShell + SHDefExtractIcon 取 256px（与桌面图标同源），失败回退 getFileIcon
+function extractIconHD(iconSource) {
+  return new Promise((resolve) => {
+    const out = path.join(os.tmpdir(), 'wb-icon-' + process.pid + '-' + Date.now() + '.png');
+    execFile('powershell.exe', [
+      '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
+      '-File', path.join(__dirname, 'tools', 'icon-extract.ps1'),
+      '-Path', iconSource, '-Out', out,
+    ], { timeout: 20000 }, (err) => {
+      try {
+        if (!err && fs.existsSync(out) && fs.statSync(out).size > 0) {
+          const data = 'data:image/png;base64,' + fs.readFileSync(out).toString('base64');
+          fs.rmSync(out, { force: true });
+          resolve(data);
+          return;
+        }
+      } catch (_) {}
+      resolve(null);
+    });
+  });
+}
+
 ipcMain.handle('target:icon', async (_e, filePath) => {
   try {
     if (!filePath) return null;
@@ -304,6 +330,8 @@ ipcMain.handle('target:icon', async (_e, filePath) => {
       } catch (_) {}
     }
     if (!fs.existsSync(iconSource)) return null;
+    const hd = await extractIconHD(iconSource);
+    if (hd) return hd;
     const img = await app.getFileIcon(iconSource, { size: 'large' });
     if (!img || img.isEmpty()) return null;
     return img.toDataURL();

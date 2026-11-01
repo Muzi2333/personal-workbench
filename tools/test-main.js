@@ -41,6 +41,7 @@ const fakeElectron = {
     setLoginItemSettings: (opts) => { loginItem.openAtLogin = !!opts.openAtLogin; calls.push(['setLoginItemSettings', loginItem.openAtLogin]); },
     async getFileIcon(p) { calls.push(['getFileIcon', p]); return { isEmpty: () => true, toDataURL: () => '' }; },
   },
+  screen: { getPrimaryDisplay: () => ({ scaleFactor: 1, workAreaSize: { width: 1920, height: 1040 } }) },
   Tray: class {
     setToolTip() {}
     setContextMenu() {}
