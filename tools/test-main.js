@@ -37,6 +37,8 @@ const fakeElectron = {
     quit() {},
     isQuitting: false,
     requestSingleInstanceLock: () => true,
+    setName: () => {},
+    setAppUserModelId: () => {},
     getLoginItemSettings: () => loginItem,
     setLoginItemSettings: (opts) => { loginItem.openAtLogin = !!opts.openAtLogin; calls.push(['setLoginItemSettings', loginItem.openAtLogin]); },
     async getFileIcon(p) { calls.push(['getFileIcon', p]); return { isEmpty: () => true, toDataURL: () => '' }; },

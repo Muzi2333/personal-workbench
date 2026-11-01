@@ -4,6 +4,10 @@ const fs = require('fs');
 const os = require('os');
 const { spawn, execFile } = require('child_process');
 
+// 任务管理器 / 任务栏分组名（打包后进程名由 exe 文件名决定，这里设置内部名）
+app.setName('工作台');
+app.setAppUserModelId('com.muzi.workbench');
+
 let win = null;
 let tray = null;
 
@@ -61,6 +65,7 @@ function createWindow() {
     frame: false,
     show: false,
     backgroundColor: '#1a1b1c',
+    icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

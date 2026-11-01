@@ -83,14 +83,14 @@
     const item = (name, target, icon, extra) => mkItem(name, target, icon, extra);
 
     const rows = [
-      { id: 'r1', name: '工作', color: '#5b9dff', height: 110 },
-      { id: 'r2', name: '开发', color: '#a78bfa', height: 110 },
-      { id: 'r3', name: '其他', color: '#4fc08d', height: 110 },
+      { id: 'r1', name: '工作', color: '#5b9dff', height: 80 },
+      { id: 'r2', name: '开发', color: '#a78bfa', height: 80 },
+      { id: 'r3', name: '其他', color: '#4fc08d', height: 80 },
     ];
     const cols = [
-      { id: 'c1', name: '常用', color: '#5b9dff', width: 100 },
-      { id: 'c2', name: '工具', color: '#e3b341', width: 100 },
-      { id: 'c3', name: '随手', color: '#f7786b', width: 100 },
+      { id: 'c1', name: '常用', color: '#5b9dff', width: 80 },
+      { id: 'c2', name: '工具', color: '#e3b341', width: 80 },
+      { id: 'c3', name: '随手', color: '#f7786b', width: 80 },
     ];
 
     const cells = {};
@@ -151,13 +151,13 @@
         id: r.id || 'r' + (i + 1),
         name: r.name || '行 ' + (i + 1),
         color: r.color || '#5b6b7c',
-        height: Math.max(80, Number(r.height) || 110),
+        height: Math.max(60, Number(r.height) || 80),
       }));
       p.cols = (Array.isArray(p.cols) ? p.cols : []).map((c, i) => ({
         id: c.id || 'c' + (i + 1),
         name: c.name || '列 ' + (i + 1),
         color: c.color || '#5b6b7c',
-        width: Math.max(60, Number(c.width) || 100),
+        width: Math.max(60, Number(c.width) || 80),
       }));
       p.cells = p.cells && typeof p.cells === 'object' ? p.cells : {};
       Object.keys(p.cells).forEach((k) => {
@@ -168,14 +168,14 @@
       p.layout = Object.assign({ gap: 10 }, p.layout || {});
     });
 
-    // v4：单元格默认尺寸改为 行高110 / 列宽100（覆盖旧的 150 正方形迁移）
-    if (!data.version || data.version < 4) {
+    // v5：单元格默认尺寸改为 行高80 / 列宽80（最小60）
+    if (!data.version || data.version < 5) {
       data.pages.forEach((p) => {
-        p.rows.forEach((r) => { r.height = 110; });
-        p.cols.forEach((c) => { c.width = 100; });
+        p.rows.forEach((r) => { r.height = 80; });
+        p.cols.forEach((c) => { c.width = 80; });
       });
     }
-    data.version = 4;
+    data.version = 5;
 
     if (!data.pages.some((p) => p.id === data.activePage)) data.activePage = data.pages[0].id;
 
@@ -446,27 +446,34 @@
   }
 
   // 安卓式悬停合并：拖拽物在单图标格上驻足 ~700ms 进入合并预览，此时松手才合并成文件夹；
-  // 驻足前松手 = 互换。返回的 track 在 pointermove 里调用，armed() 给出当前已武装的格 key
+  // 驻足前松手 = 互换。用 setTimeout 驱动，无需持续移动指针也能触发动画
   function makeDwellMerge(canArm) {
     let key = null;
-    let start = 0;
     let armedKey = null;
+    let timer = null;
+    const clearTimer = () => { if (timer) { clearTimeout(timer); timer = null; } };
     return {
       track(x, y) {
         const cell = Grid.cellAt(x, y);
         const k = cell ? cell.dataset.key : null;
-        if (k !== key) {
-          key = k;
-          start = Date.now();
-          armedKey = null;
-          clearMergePreview();
-        } else if (k && !armedKey && Date.now() - start > 700 && canArm(k)) {
-          armedKey = k;
-          if (cell) cell.classList.add('merge-hover');
+        if (k === key) return; // 指针仍停在同一格，不动
+        // 换到新格：重置计时器与预览
+        key = k;
+        armedKey = null;
+        clearTimer();
+        clearMergePreview();
+        if (k && canArm(k)) {
+          timer = setTimeout(() => {
+            if (key !== k) return; // 期间移走了则放弃
+            armedKey = k;
+            const el = document.querySelector('.cell[data-key="' + k + '"]');
+            if (el) el.classList.add('merge-hover');
+          }, 700);
         }
       },
       armed: () => armedKey,
       reset() {
+        clearTimer();
         key = null;
         armedKey = null;
         clearMergePreview();
@@ -1291,7 +1298,7 @@
         '<input type="color" id="h-color-pick" value="' + (hexOrEmpty(target.color) || '#5b6b7c') + '" style="width:34px;height:32px;padding:0;border:1px solid rgba(255,255,255,.1);border-radius:7px;background:transparent;cursor:pointer">',
         '<input class="input" id="h-color" placeholder="#5b6b7c" spellcheck="false"></div></div>',
         '<div class="field"><label>' + sizeLabel + '</label>',
-        '<input class="input" id="h-size" type="number" min="' + (isRow ? 80 : 60) + '" max="600" spellcheck="false"></div>',
+        '<input class="input" id="h-size" type="number" min="60" max="600" spellcheck="false"></div>',
         '</div>',
       ].join(''),
       buttons: [
@@ -1301,7 +1308,7 @@
           target.color = hexOrEmpty(body.querySelector('#h-color').value) || target.color;
           const size = Number(body.querySelector('#h-size').value);
           if (size > 0) {
-            if (isRow) target.height = Math.max(80, size);
+            if (isRow) target.height = Math.max(60, size);
             else target.width = Math.max(60, size);
           }
           scheduleSave();
@@ -1537,8 +1544,8 @@
       const v = Number(size.value);
       state.settings.iconSize = v;
       el.grid.style.setProperty('--icon-size', v + 'px');
-      const rowH = Math.max(80, Math.round(110 * v / 54));
-      const colW = Math.max(60, Math.round(100 * v / 54));
+      const rowH = Math.max(60, Math.round(80 * v / 54));
+      const colW = Math.max(60, Math.round(80 * v / 54));
       state.pages.forEach((p) => {
         p.rows.forEach((r) => { r.height = rowH; });
         p.cols.forEach((c) => { c.width = colW; });
