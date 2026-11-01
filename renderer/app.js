@@ -221,10 +221,10 @@
 
     data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false }, data.settings || {});
     data.iconCache = data.iconCache || {};
-    // 图标缓存版本：新增 UWP 应用图标解析，清掉全部旧缓存强制重取
-    if (data.cacheVer !== 4) {
+    // 图标缓存版本：回退 UWP 图标解析（部分图标发糊），清掉全部旧缓存强制重取
+    if (data.cacheVer !== 5) {
       data.iconCache = {};
-      data.cacheVer = 4;
+      data.cacheVer = 5;
     }
     return data;
   }
@@ -354,9 +354,15 @@
       render();
     });
 
-    el.grid.querySelector('#st-undo').addEventListener('change', (e) => {
+    // 撤销上限输入框：宽度跟随内容长度变化
+    const undoInput = el.grid.querySelector('#st-undo');
+    const fitUndo = (inp) => { inp.style.width = Math.max(3, String(inp.value).length + 2) + 'ch'; };
+    fitUndo(undoInput);
+    undoInput.addEventListener('input', () => fitUndo(undoInput));
+    undoInput.addEventListener('change', (e) => {
       const v = Math.max(0, Math.min(1000, Number(e.target.value) || 0));
       e.target.value = String(v);
+      fitUndo(e.target);
       if (v === state.settings.undoLimit) return;
       pushHistory();
       state.settings.undoLimit = v;

@@ -322,78 +322,19 @@ function extractIconHD(iconSource) {
   });
 }
 
-// UWP / MSIX 应用（如 ChatGPT、计算器等商店应用）的快捷方式目标是
-// AppUserModelID（PackageFamily!App），不是真实文件路径，SHDefExtractIcon 取不到。
-// 这里通过 Get-AppxPackage 找到安装目录，读 AppxManifest 里的 Logo 并优先选高分辨率变体。
-function resolveUwpIcon(aumid) {
-  return new Promise((resolve) => {
-    const family = String(aumid || '').split('!')[0];
-    if (!/^[A-Za-z0-9][\w.+-]*_[A-Za-z0-9]+$/.test(family)) return resolve(null);
-    const ps = [
-      '$ErrorActionPreference="SilentlyContinue"',
-      // family 已被上面的正则限制为安全字符（无引号），可直接插值
-      '$pkg = Get-AppxPackage | Where-Object { $_.PackageFamilyName -eq \'' + family + '\' } | Select-Object -First 1',
-      'if (-not $pkg) { exit 1 }',
-      '$dir = $pkg.InstallLocation',
-      '[xml]$m = Get-Content (Join-Path $dir "AppxManifest.xml")',
-      '$app = @($m.Package.Applications.Application)[0]',
-      '$ve = $app.VisualElements',
-      '$logo = $ve.Square150x150Logo',
-      'if (-not $logo) { $logo = $ve.Square44x44Logo }',
-      'if (-not $logo) { $logo = $m.Package.Properties.Logo }',
-      'if (-not $logo) { exit 1 }',
-      '$base = Join-Path $dir ($logo -replace "/", "\\")',
-      '$stem = Join-Path (Split-Path $base) ([IO.Path]::GetFileNameWithoutExtension($base))',
-      '$ext = [IO.Path]::GetExtension($base)',
-      // 注意：PowerShell 里逗号优先级低于 +，数组元素是表达式时必须加括号
-      '$cands = @(',
-      '  ($stem + ".scale-400" + $ext),',
-      '  ($stem + ".targetsize-256_altform-unplated" + $ext),',
-      '  ($stem + ".targetsize-256" + $ext),',
-      '  ($stem + ".scale-200" + $ext),',
-      '  ($stem + ".scale-150" + $ext),',
-      '  ($stem + ".scale-125" + $ext),',
-      '  ($stem + ".scale-100" + $ext),',
-      '  $base',
-      ')',
-      '$hit = $cands | Where-Object { Test-Path $_ } | Select-Object -First 1',
-      'if ($hit) { Write-Output $hit } else { exit 1 }',
-    ].join('\r\n');
-    execFile('powershell.exe', [
-      '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', ps,
-    ], { timeout: 20000 }, (err, stdout) => {
-      const p = String(stdout || '').trim().split(/\r?\n/).filter(Boolean).pop() || '';
-      if (err || !p || !fs.existsSync(p)) return resolve(null);
-      try {
-        const buf = fs.readFileSync(p);
-        if (!buf.length) return resolve(null);
-        resolve('data:image/png;base64,' + buf.toString('base64'));
-      } catch (_) {
-        resolve(null);
-      }
-    });
-  });
-}
-
 ipcMain.handle('target:icon', async (_e, filePath) => {
   try {
     if (!filePath) return null;
     let iconSource = filePath;
-    let uwpId = '';
     // 快捷方式：解析出自定义图标或真实目标，否则只能拿到通用快捷方式图标
     if (/\.lnk$/i.test(filePath) && fs.existsSync(filePath)) {
       try {
         const link = shell.readShortcutLink(filePath);
         if (link.icon && fs.existsSync(link.icon)) iconSource = link.icon;
         else if (link.target && fs.existsSync(link.target)) iconSource = link.target;
-        else uwpId = link.appUserModelID || link.target || '';
       } catch (_) {}
     }
-    if (!fs.existsSync(iconSource)) {
-      // 目标是 UWP 应用（AppUserModelID）：从应用包里找 Logo
-      if (uwpId) return await resolveUwpIcon(uwpId);
-      return null;
-    }
+    if (!fs.existsSync(iconSource)) return null;
     const hd = await extractIconHD(iconSource);
     if (hd) return hd;
     const img = await app.getFileIcon(iconSource, { size: 'large' });
