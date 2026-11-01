@@ -221,10 +221,10 @@
 
     data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false }, data.settings || {});
     data.iconCache = data.iconCache || {};
-    // 图标缓存版本：回退 UWP 图标解析（部分图标发糊），清掉全部旧缓存强制重取
-    if (data.cacheVer !== 5) {
+    // 图标缓存版本：修复打包版 256px 提取脚本缺失（此前一直落 48px 模糊兜底），清缓存重取
+    if (data.cacheVer !== 6) {
       data.iconCache = {};
-      data.cacheVer = 5;
+      data.cacheVer = 6;
     }
     return data;
   }

@@ -301,12 +301,27 @@ ipcMain.handle('target:launch', async (_e, payload) => {
 });
 
 // 高清图标：调 PowerShell + SHDefExtractIcon 取 256px（与桌面图标同源），失败回退 getFileIcon
+// 打包后 tools/icon-extract.ps1 在 app.asar 内，PowerShell（外部进程）读不了，
+// 启动时把脚本解到临时目录再调用（Electron 主进程可读 asar，写入的是原始字节，保留 BOM）
+let ps1Path = null;
+function ensureIconScript() {
+  if (ps1Path) return ps1Path;
+  try {
+    const raw = fs.readFileSync(path.join(__dirname, 'tools', 'icon-extract.ps1'));
+    ps1Path = path.join(os.tmpdir(), 'wb-icon-extract-' + process.pid + '.ps1');
+    fs.writeFileSync(ps1Path, raw);
+  } catch (_) {
+    ps1Path = path.join(__dirname, 'tools', 'icon-extract.ps1'); // 开发模式兜底
+  }
+  return ps1Path;
+}
+
 function extractIconHD(iconSource) {
   return new Promise((resolve) => {
     const out = path.join(os.tmpdir(), 'wb-icon-' + process.pid + '-' + Date.now() + '.png');
     execFile('powershell.exe', [
       '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass',
-      '-File', path.join(__dirname, 'tools', 'icon-extract.ps1'),
+      '-File', ensureIconScript(),
       '-Path', iconSource, '-Out', out,
     ], { timeout: 20000 }, (err) => {
       try {

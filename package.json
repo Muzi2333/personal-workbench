@@ -21,6 +21,7 @@
       "preload.js",
       "renderer/**/*",
       "assets/**/*",
+      "tools/icon-extract.ps1",
       "package.json"
     ],
     "win": {
