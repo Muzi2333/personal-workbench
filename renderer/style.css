@@ -370,6 +370,19 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .cell.drop-hover { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent) inset; }
 .cell.dim { opacity: 0.24; }
 
+/* 驻足合并预览（安卓式）：accent 内描边 + 目标图标脉冲 */
+.cell.merge-hover {
+  border-color: var(--accent);
+  background: rgba(91, 157, 255, 0.16);
+  box-shadow: 0 0 0 2px var(--accent) inset;
+}
+.cell.merge-hover .icon { animation: mergePulse 0.45s ease; }
+@keyframes mergePulse {
+  0% { transform: scale(1); }
+  40% { transform: scale(0.86); }
+  100% { transform: scale(1); }
+}
+
 .cell.is-empty {
   background: rgba(255, 255, 255, 0.018);
   border: 1px dashed #303335;

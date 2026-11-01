@@ -83,14 +83,14 @@
     const item = (name, target, icon, extra) => mkItem(name, target, icon, extra);
 
     const rows = [
-      { id: 'r1', name: '工作', color: '#5b9dff', height: 150 },
-      { id: 'r2', name: '开发', color: '#a78bfa', height: 150 },
-      { id: 'r3', name: '其他', color: '#4fc08d', height: 150 },
+      { id: 'r1', name: '工作', color: '#5b9dff', height: 110 },
+      { id: 'r2', name: '开发', color: '#a78bfa', height: 110 },
+      { id: 'r3', name: '其他', color: '#4fc08d', height: 110 },
     ];
     const cols = [
-      { id: 'c1', name: '常用', color: '#5b9dff', width: 150 },
-      { id: 'c2', name: '工具', color: '#e3b341', width: 150 },
-      { id: 'c3', name: '随手', color: '#f7786b', width: 150 },
+      { id: 'c1', name: '常用', color: '#5b9dff', width: 100 },
+      { id: 'c2', name: '工具', color: '#e3b341', width: 100 },
+      { id: 'c3', name: '随手', color: '#f7786b', width: 100 },
     ];
 
     const cells = {};
@@ -151,13 +151,13 @@
         id: r.id || 'r' + (i + 1),
         name: r.name || '行 ' + (i + 1),
         color: r.color || '#5b6b7c',
-        height: Number(r.height) || 150,
+        height: Math.max(80, Number(r.height) || 110),
       }));
       p.cols = (Array.isArray(p.cols) ? p.cols : []).map((c, i) => ({
         id: c.id || 'c' + (i + 1),
         name: c.name || '列 ' + (i + 1),
         color: c.color || '#5b6b7c',
-        width: Number(c.width) || 150,
+        width: Math.max(60, Number(c.width) || 100),
       }));
       p.cells = p.cells && typeof p.cells === 'object' ? p.cells : {};
       Object.keys(p.cells).forEach((k) => {
@@ -168,14 +168,14 @@
       p.layout = Object.assign({ gap: 10 }, p.layout || {});
     });
 
-    // v1 → v2：所有单元格统一为正方形（150px）
-    if (!data.version || data.version < 2) {
+    // v4：单元格默认尺寸改为 行高110 / 列宽100（覆盖旧的 150 正方形迁移）
+    if (!data.version || data.version < 4) {
       data.pages.forEach((p) => {
-        p.rows.forEach((r) => { r.height = 150; });
-        p.cols.forEach((c) => { c.width = 150; });
+        p.rows.forEach((r) => { r.height = 110; });
+        p.cols.forEach((c) => { c.width = 100; });
       });
     }
-    data.version = 3;
+    data.version = 4;
 
     if (!data.pages.some((p) => p.id === data.activePage)) data.activePage = data.pages[0].id;
 
@@ -351,6 +351,26 @@
     requestIcons();
   }
 
+  // 互换：把图标与目标格的单个图标交换位置（安卓桌面式）
+  function swapItems(fromKey, itemId, toKey, fromPageId) {
+    const srcPage = fromPageId ? pageOf(fromPageId) : curPage();
+    const src = Grid.getCell(srcPage, fromKey, false);
+    const dst = cellOf(toKey, false);
+    if (!src || !dst || !dst.items || dst.items.length !== 1) {
+      moveItem(fromKey, itemId, toKey, false, fromPageId);
+      return;
+    }
+    const idx = (src.items || []).findIndex((i) => i.id === itemId);
+    if (idx < 0) return;
+    const moved = src.items[idx];
+    const other = dst.items[0];
+    src.items.splice(idx, 1, other);
+    dst.items[0] = moved;
+    scheduleSave();
+    render();
+    requestIcons();
+  }
+
   // 整格搬运：把 fromKey 格子的全部图标移到 toKey（合并成分组）
   function moveCellContents(fromKey, toKey, copy, fromPageId) {
     const srcPage = fromPageId ? pageOf(fromPageId) : curPage();
@@ -421,6 +441,39 @@
     document.querySelectorAll('.page-item.drop-hover').forEach((n) => n.classList.remove('drop-hover'));
   }
 
+  function clearMergePreview() {
+    document.querySelectorAll('.cell.merge-hover').forEach((c) => c.classList.remove('merge-hover'));
+  }
+
+  // 安卓式悬停合并：拖拽物在单图标格上驻足 ~700ms 进入合并预览，此时松手才合并成文件夹；
+  // 驻足前松手 = 互换。返回的 track 在 pointermove 里调用，armed() 给出当前已武装的格 key
+  function makeDwellMerge(canArm) {
+    let key = null;
+    let start = 0;
+    let armedKey = null;
+    return {
+      track(x, y) {
+        const cell = Grid.cellAt(x, y);
+        const k = cell ? cell.dataset.key : null;
+        if (k !== key) {
+          key = k;
+          start = Date.now();
+          armedKey = null;
+          clearMergePreview();
+        } else if (k && !armedKey && Date.now() - start > 700 && canArm(k)) {
+          armedKey = k;
+          if (cell) cell.classList.add('merge-hover');
+        }
+      },
+      armed: () => armedKey,
+      reset() {
+        key = null;
+        armedKey = null;
+        clearMergePreview();
+      },
+    };
+  }
+
   function startIconDrag(ev, cellKey, itemId) {
     const cell = cellOf(cellKey, false);
     if (!cell) return;
@@ -433,6 +486,12 @@
     const startY = ev.clientY;
     let moved = false;
     let ghost = null;
+    // 驻足合并：目标格只有 1 个图标且不是源格时，悬停 700ms 武装合并
+    const dwell = makeDwellMerge((k) => {
+      if (k === cellKey && state.activePage === srcPageId) return false;
+      const c = cellOf(k, false);
+      return !!(c && (c.items || []).length === 1);
+    });
 
     const onMove = (e) => {
       if (!moved) {
@@ -445,6 +504,7 @@
       ghost.style.transform = 'translate(' + (e.clientX - size / 2) + 'px,' + (e.clientY - size / 2) + 'px)';
       highlightCell(e.clientX, e.clientY, cellKey);
       dragHoverPage(e.clientX, e.clientY);
+      dwell.track(e.clientX, e.clientY);
     };
 
     const onUp = (e) => {
@@ -454,6 +514,8 @@
       if (node) node.classList.remove('is-dragging');
       clearHighlight();
       clearPageHover();
+      const mergeKey = dwell.armed();
+      dwell.reset();
 
       if (!moved) {
         handleIconTap(item);
@@ -461,10 +523,27 @@
       }
 
       const target = Grid.cellAt(e.clientX, e.clientY);
-      if (!target) return;
+      if (!target) { render(); return; }
       const toKey = target.dataset.key;
       if (toKey === cellKey && state.activePage === srcPageId) return;
-      moveItem(cellKey, itemId, toKey, e.ctrlKey || e.metaKey, srcPageId);
+      const copy = e.ctrlKey || e.metaKey;
+      if (copy) {
+        moveItem(cellKey, itemId, toKey, true, srcPageId);
+        return;
+      }
+      if (mergeKey === toKey) {
+        // 驻足后松手：合并成文件夹
+        moveItem(cellKey, itemId, toKey, false, srcPageId);
+        return;
+      }
+      const dst = cellOf(toKey, false);
+      if (dst && (dst.items || []).length === 1) {
+        // 目标格已有单个图标：互换（安卓式）
+        swapItems(cellKey, itemId, toKey, srcPageId);
+        return;
+      }
+      // 空格或已是文件夹：直接并入
+      moveItem(cellKey, itemId, toKey, false, srcPageId);
     };
 
     window.addEventListener('pointermove', onMove);
@@ -1212,7 +1291,7 @@
         '<input type="color" id="h-color-pick" value="' + (hexOrEmpty(target.color) || '#5b6b7c') + '" style="width:34px;height:32px;padding:0;border:1px solid rgba(255,255,255,.1);border-radius:7px;background:transparent;cursor:pointer">',
         '<input class="input" id="h-color" placeholder="#5b6b7c" spellcheck="false"></div></div>',
         '<div class="field"><label>' + sizeLabel + '</label>',
-        '<input class="input" id="h-size" type="number" min="80" max="600" spellcheck="false"></div>',
+        '<input class="input" id="h-size" type="number" min="' + (isRow ? 80 : 60) + '" max="600" spellcheck="false"></div>',
         '</div>',
       ].join(''),
       buttons: [
@@ -1222,8 +1301,8 @@
           target.color = hexOrEmpty(body.querySelector('#h-color').value) || target.color;
           const size = Number(body.querySelector('#h-size').value);
           if (size > 0) {
-            if (isRow) target.height = Math.max(96, size);
-            else target.width = Math.max(110, size);
+            if (isRow) target.height = Math.max(80, size);
+            else target.width = Math.max(60, size);
           }
           scheduleSave();
           render();
@@ -1249,12 +1328,19 @@
       if (ev.button !== 0) return;
       ev.preventDefault();
 
+      const srcPageId = curPage().id; // 源页：跨页拖拽时从这里搬走
       const startX = ev.clientX;
       const startY = ev.clientY;
       const dialogBox = node.closest('.dialog');
       let mode = null; // 'reorder' | 'out'
       let ghost = null;
       let insertAt = -1;
+      // 驻足合并：目标格只有 1 个图标且不是源格时，悬停 700ms 武装合并
+      const dwell = makeDwellMerge((k) => {
+        if (k === key && state.activePage === srcPageId) return false;
+        const c = cellOf(k, false);
+        return !!(c && (c.items || []).length === 1);
+      });
 
       const clearMarks = () => {
         grid.querySelectorAll('.drop-before, .drop-after').forEach((n) => n.classList.remove('drop-before', 'drop-after'));
@@ -1295,6 +1381,8 @@
           else if (icons.length) icons[icons.length - 1].classList.add('drop-after');
         } else {
           highlightCell(e.clientX, e.clientY, key);
+          dragHoverPage(e.clientX, e.clientY);
+          dwell.track(e.clientX, e.clientY);
         }
       };
 
@@ -1303,7 +1391,10 @@
         window.removeEventListener('pointerup', onUp);
         if (ghost) ghost.remove();
         clearHighlight();
+        clearPageHover();
         clearMarks();
+        const mergeKey = dwell.armed();
+        dwell.reset();
 
         if (!mode) { launchItem(item); return; }
 
@@ -1321,13 +1412,29 @@
           return;
         }
 
-        // mode === 'out'：落到主宫格
+        // mode === 'out'：落到主宫格（与 startIconDrag 同一套落点决策）
         const target = Grid.cellAt(e.clientX, e.clientY);
-        if (target && target.dataset.key !== key) {
-          moveItem(key, item.id, target.dataset.key, e.ctrlKey || e.metaKey);
-        } else {
-          render();
+        if (!target) { render(); return; }
+        const toKey = target.dataset.key;
+        if (toKey === key && state.activePage === srcPageId) { render(); return; }
+        const copy = e.ctrlKey || e.metaKey;
+        if (copy) {
+          moveItem(key, item.id, toKey, true, srcPageId);
+          return;
         }
+        if (mergeKey === toKey) {
+          // 驻足后松手：合并成文件夹
+          moveItem(key, item.id, toKey, false, srcPageId);
+          return;
+        }
+        const dst = cellOf(toKey, false);
+        if (dst && (dst.items || []).length === 1) {
+          // 目标格已有单个图标：互换（安卓式）
+          swapItems(key, item.id, toKey, srcPageId);
+          return;
+        }
+        // 空格或已是文件夹：直接并入
+        moveItem(key, item.id, toKey, false, srcPageId);
       };
 
       window.addEventListener('pointermove', onMove);
@@ -1423,13 +1530,21 @@
       applyFilter();
     });
 
-    // 工具栏
+    // 工具栏：图标大小（行高列宽按基准 54px↔110×100 等比联动）
     const size = $('icon-size');
     size.value = String(state.settings.iconSize || 54);
     size.addEventListener('input', () => {
-      state.settings.iconSize = Number(size.value);
-      el.grid.style.setProperty('--icon-size', size.value + 'px');
+      const v = Number(size.value);
+      state.settings.iconSize = v;
+      el.grid.style.setProperty('--icon-size', v + 'px');
+      const rowH = Math.max(80, Math.round(110 * v / 54));
+      const colW = Math.max(60, Math.round(100 * v / 54));
+      state.pages.forEach((p) => {
+        p.rows.forEach((r) => { r.height = rowH; });
+        p.cols.forEach((c) => { c.width = colW; });
+      });
       scheduleSave();
+      render();
     });
 
     $('btn-menu').addEventListener('click', (e) => {
