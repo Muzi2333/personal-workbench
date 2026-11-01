@@ -1,12 +1,32 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 
 let win = null;
+let tray = null;
 
 const dataFile = () => path.join(app.getPath('userData'), 'data.json');
 const backupFile = () => path.join(app.getPath('userData'), 'data.backup.json');
+
+function showMainWindow() {
+  if (!win || win.isDestroyed()) return;
+  if (!win.isVisible()) win.show();
+  if (win.isMinimized()) win.restore();
+  win.focus();
+}
+
+function createTray() {
+  const icon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray.png'));
+  tray = new Tray(icon);
+  tray.setToolTip('工作台');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '显示主界面', click: showMainWindow },
+    { type: 'separator' },
+    { label: '退出', click: () => { app.isQuitting = true; app.quit(); } },
+  ]));
+  tray.on('click', showMainWindow);
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -28,6 +48,14 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   win.once('ready-to-show', () => win.show());
 
+  // 关闭按钮 = 隐藏到托盘，只有托盘右键「退出」才真正结束进程
+  win.on('close', (e) => {
+    if (!app.isQuitting) {
+      e.preventDefault();
+      win.hide();
+    }
+  });
+
   const pushState = () => {
     if (win && !win.isDestroyed()) {
       win.webContents.send('window:state', { maximized: win.isMaximized() });
@@ -37,16 +65,24 @@ function createWindow() {
   win.on('unmaximize', pushState);
 }
 
-app.whenReady().then(() => {
-  createWindow();
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
-});
+// 单实例：已运行时再次启动只唤起现有窗口
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', showMainWindow);
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+  app.whenReady().then(() => {
+    createWindow();
+    createTray();
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+}
 
 /* ---------------------------------- 数据 ---------------------------------- */
 
@@ -112,6 +148,30 @@ ipcMain.handle('data:import', async () => {
 ipcMain.handle('app:open-data-dir', async () => {
   shell.openPath(app.getPath('userData'));
   return { ok: true };
+});
+
+/* -------------------------------- 开机自启动 -------------------------------- */
+
+ipcMain.handle('app:get-auto-launch', async () => {
+  try {
+    return { ok: true, enabled: app.getLoginItemSettings().openAtLogin };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+});
+
+ipcMain.handle('app:set-auto-launch', async (_e, enabled) => {
+  try {
+    // 开发态指向 electron.exe + 应用目录；打包后默认即自身 exe
+    app.setLoginItemSettings({
+      openAtLogin: !!enabled,
+      path: process.execPath,
+      args: [app.getAppPath()],
+    });
+    return { ok: true, enabled: !!enabled };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
 });
 
 /* ------------------------------- 启动本地程序 ------------------------------- */

@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('workbench', {
   exportData: (data) => ipcRenderer.invoke('data:export', data),
   importData: () => ipcRenderer.invoke('data:import'),
   openDataDir: () => ipcRenderer.invoke('app:open-data-dir'),
+  getAutoLaunch: () => ipcRenderer.invoke('app:get-auto-launch'),
+  setAutoLaunch: (enabled) => ipcRenderer.invoke('app:set-auto-launch', enabled),
 
   launch: (payload) => ipcRenderer.invoke('target:launch', payload),
   icon: (filePath) => ipcRenderer.invoke('target:icon', filePath),

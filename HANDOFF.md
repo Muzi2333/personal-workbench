@@ -196,9 +196,8 @@ node tools\preview-server.js "<项目路径>\renderer" 5173
 ## 10. 未完成 / 后续 TODO
 
 - [ ] 用 `electron-builder` 打包免安装 exe（预估 150MB）
-- [ ] 开机自启、桌面/开始菜单快捷方式
+- [ ] 桌面/开始菜单快捷方式（开机自启、托盘常驻、单实例已完成：main.js 托盘 + requestSingleInstanceLock + setLoginItemSettings，设置菜单内开关）
 - [ ] 撤销/重做（当前所有结构操作不可回退）
-- [ ] 分组弹层内拖出到主格子的能力（目前只能通过主格子拖拽重组）
 - [ ] UWP 应用启动与图标（可走 `explorer.exe shell:AppsFolder\<AppID>`）
 - [ ] 多主题（浅色 / 跟随系统）、`.gitattributes` 统一换行
 - [ ] 行列拖动时的更精细的落点反馈（当前只有插入线）

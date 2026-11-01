@@ -26,14 +26,28 @@ class FakeWindow {
   close() {}
 }
 
+const loginItem = { openAtLogin: false };
+
 const fakeElectron = {
   app: {
     getPath: (k) => (k === 'userData' ? userData : path.join(os.tmpdir(), 'wb-' + k)),
+    getAppPath: () => path.join(__dirname, '..'),
     whenReady: () => Promise.resolve(),
     on() {},
     quit() {},
+    isQuitting: false,
+    requestSingleInstanceLock: () => true,
+    getLoginItemSettings: () => loginItem,
+    setLoginItemSettings: (opts) => { loginItem.openAtLogin = !!opts.openAtLogin; calls.push(['setLoginItemSettings', loginItem.openAtLogin]); },
     async getFileIcon(p) { calls.push(['getFileIcon', p]); return { isEmpty: () => true, toDataURL: () => '' }; },
   },
+  Tray: class {
+    setToolTip() {}
+    setContextMenu() {}
+    on() {}
+  },
+  Menu: { buildFromTemplate: (tpl) => ({ tpl }) },
+  nativeImage: { createFromPath: (p) => ({ p }) },
   BrowserWindow: FakeWindow,
   ipcMain: {
     handle: (ch, fn) => { handlers[ch] = fn; },
@@ -98,6 +112,14 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   // 8. 图标
   const icon = await handlers['target:icon']({}, 'C:\\Windows\\System32\\notepad.exe');
   results.push(['target:icon', true, 'returned=' + typeof icon]);
+
+  // 9. 开机自启：默认关 → 开 → 读回 → 关
+  const a0 = await handlers['app:get-auto-launch']({});
+  await handlers['app:set-auto-launch']({}, true);
+  const a1 = await handlers['app:get-auto-launch']({});
+  await handlers['app:set-auto-launch']({}, false);
+  const a2 = await handlers['app:get-auto-launch']({});
+  results.push(['auto-launch toggle', a0.ok && !a0.enabled && a1.enabled && !a2.enabled, 'off→on→off']);
 
   results.forEach((r) => console.log(r[0].padEnd(22), r[1] ? 'PASS' : 'FAIL', r[2]));
   console.log('\nshell calls:', JSON.stringify(calls));

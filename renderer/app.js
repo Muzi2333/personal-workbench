@@ -15,6 +15,8 @@
       exportData: async () => ({ ok: false, error: '预览模式不支持导出' }),
       importData: async () => ({ ok: false }),
       openDataDir: async () => {},
+      getAutoLaunch: async () => ({ ok: false }),
+      setAutoLaunch: async () => ({ ok: false, error: '预览模式不支持开机自启' }),
       launch: async ({ target }) => {
         if (/^https?:/i.test(target || '')) { window.open(target, '_blank'); return { ok: true }; }
         return { ok: false, error: '浏览器预览模式无法启动本地程序，请用 Electron 运行（npm start）' };
@@ -871,13 +873,20 @@
     ]);
   }
 
-  function openToolbarMenu(x, y) {
+  async function openToolbarMenu(x, y) {
+    const auto = await api.getAutoLaunch();
+    const autoOn = !!(auto && auto.ok && auto.enabled);
     openMenu(x, y, [
       { label: '添加快捷方式', action: () => openItemDialog(ui.activeCell || firstCellKey(), null) },
       { label: '添加一行', action: () => insertRow(curPage().rows.length) },
       { label: '添加一列', action: () => insertCol(curPage().cols.length) },
       { label: '增加一页应用', action: () => addPage() },
       { sep: true },
+      { label: autoOn ? '开机自启动：已开启' : '开机自启动：已关闭', action: async () => {
+        const res = await api.setAutoLaunch(!autoOn);
+        if (res && res.ok) toast(res.enabled ? '已开启开机自启动' : '已关闭开机自启动', 'ok');
+        else toast((res && res.error) || '设置失败', 'err');
+      } },
       { label: state.settings.launch === 'double' ? '启动方式：双击 → 改为单击' : '启动方式：单击 → 改为双击', action: () => {
         state.settings.launch = state.settings.launch === 'double' ? 'single' : 'double';
         scheduleSave();
@@ -1518,31 +1527,32 @@
       openCellMenu(cell.dataset.key, e.clientX, e.clientY);
     });
 
-    // 拖入文件
+    // 拖入文件：落在格子上进该格，落在画布空白处进当前格（桌面拖来也能接住）
     window.addEventListener('dragover', (e) => e.preventDefault());
-    el.grid.addEventListener('dragover', (e) => {
-      const cell = e.target.closest('.cell');
-      if (!cell) return;
+    el.canvas.addEventListener('dragover', (e) => {
+      if (!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'))) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'copy';
-      cell.classList.add('drop-hover');
+      const cell = e.target.closest('.cell');
+      if (cell) cell.classList.add('drop-hover');
     });
-    el.grid.addEventListener('dragleave', (e) => {
+    el.canvas.addEventListener('dragleave', (e) => {
       const cell = e.target.closest('.cell');
       if (cell) cell.classList.remove('drop-hover');
     });
-    el.grid.addEventListener('drop', (e) => {
-      const cell = e.target.closest('.cell');
-      if (!cell) return;
+    el.canvas.addEventListener('drop', (e) => {
       e.preventDefault();
-      cell.classList.remove('drop-hover');
+      const cell = e.target.closest('.cell');
+      const key = cell ? cell.dataset.key : (ui.activeCell || firstCellKey());
+      clearHighlight();
+      if (!key) return;
       const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
       const paths = files.map((f) => api.pathForFile(f)).filter(Boolean);
       if (!paths.length) {
-        toast(isElectron ? '没有读取到文件路径' : '浏览器预览模式无法读取本地文件路径', 'err');
+        if (files.length) toast(isElectron ? '没有读取到文件路径' : '浏览器预览模式无法读取本地文件路径', 'err');
         return;
       }
-      const targetCell = cellOf(cell.dataset.key, true);
+      const targetCell = cellOf(key, true);
       paths.forEach((p) => {
         targetCell.items.push({
           id: Grid.newId('i'),
