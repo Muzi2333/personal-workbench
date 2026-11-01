@@ -28,7 +28,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
@@ -46,6 +48,7 @@
   },
   "devDependencies": {
     "electron": "^33.0.0",
-    "electron-builder": "^26.18.0"
+    "electron-builder": "^26.18.0",
+    "pinyin-pro": "^3.29.5"
   }
 }

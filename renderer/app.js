@@ -64,6 +64,7 @@
     q: '',
     activeCell: null,
     lastTap: { item: '', t: 0 },
+    searchPage: null, // 搜索结果临时页（不落盘）
   };
 
   const el = {};
@@ -250,51 +251,186 @@
 
   /* --------------------------------- 渲染 --------------------------------- */
 
+  // 当前展示的页：搜索时是临时合成的搜索结果页（只读），否则是真实页
+  function viewPage() {
+    return ui.searchPage || curPage();
+  }
+
   function render() {
     const canvas = el.canvas;
     const sx = canvas.scrollLeft;
     const sy = canvas.scrollTop;
-    Grid.render(el.grid, curPage(), state);
+    Grid.render(el.grid, viewPage(), state);
     canvas.scrollLeft = sx;
     canvas.scrollTop = sy;
-    applyFilter();
     updateStatusHint();
     renderSidebar();
   }
 
-  function applyFilter() {
-    const q = ui.q.trim().toLowerCase();
-    const pageCells = curPage().cells;
-    const cells = el.grid.querySelectorAll('.cell');
-    cells.forEach((cell) => {
-      const key = cell.dataset.key;
-      const items = (pageCells[key] && pageCells[key].items) || [];
-      if (!q) {
-        cell.classList.remove('dim');
-        cell.querySelectorAll('.icon, .folder').forEach((n) => { n.style.display = ''; });
-        return;
+  /* -------------------------------- 全局搜索 -------------------------------- */
+  // 匹配规则：直接包含 / 全拼音 / 首字母（首拼）/ 英文单词首字母 / 子序列模糊
+  const PY = window.pinyinPro || null;
+  const pyCache = new Map();
+
+  function pinyinOf(name) {
+    const key = String(name || '');
+    const cached = pyCache.get(key);
+    if (cached) return cached;
+    let full = key.toLowerCase();
+    let initials = key.toLowerCase();
+    if (PY && key) {
+      try {
+        full = PY.pinyin(key, { toneType: 'none', type: 'array' }).join('').toLowerCase();
+        initials = PY.pinyin(key, { pattern: 'first', type: 'array' }).join('').toLowerCase();
+      } catch (_) {}
+    }
+    // 英文单词首字母：Visual Studio Code → vsc
+    const words = (key.toLowerCase().match(/[a-z0-9]+/g) || []).map((w) => w[0]).join('');
+    const info = { full, initials, words };
+    if (pyCache.size > 4000) pyCache.clear();
+    pyCache.set(key, info);
+    return info;
+  }
+
+  // q 是否为 text 的子序列（模糊搜索，如 wxe → weixin）
+  function isSubsequence(q, text) {
+    let i = 0;
+    for (let j = 0; j < text.length && i < q.length; j++) {
+      if (text[j] === q[i]) i++;
+    }
+    return i === q.length;
+  }
+
+  function compactQuery(q) {
+    return String(q || '').replace(/[^0-9a-z\u4e00-\u9fa5]/gi, '').toLowerCase();
+  }
+
+  function matchItem(item, q, compact) {
+    const name = String(item.name || '').toLowerCase();
+    if (name.includes(q)) return true;
+    const noSpace = name.replace(/\s+/g, '');
+    if (compact && noSpace.includes(compact)) return true;
+
+    const { full, initials, words } = pinyinOf(item.name);
+    if (compact) {
+      if (full.includes(compact) || initials.includes(compact)) return true;
+      if (words && words.includes(compact)) return true;
+      if (compact.length >= 2) {
+        if (isSubsequence(compact, full.replace(/[^a-z0-9]/g, ''))) return true;
+        if (isSubsequence(compact, initials)) return true;
       }
-      const hit = items.some((it) => String(it.name || '').toLowerCase().includes(q));
-      cell.classList.toggle('dim', !hit);
-      if (items.length === 1) {
-        const node = cell.querySelector('.icon');
-        if (node) node.style.display = hit ? '' : 'none';
-      }
+    }
+
+    // 启动目标（路径 / 网址）也参与匹配，方便按文件名查找
+    const target = String(item.target || '').toLowerCase();
+    if (!target) return false;
+    return target.includes(q) || (!!compact && target.includes(compact));
+  }
+
+  const SEARCH_PAGE_ID = '__search__';
+
+  // 搜索结果页：把所有页里命中的图标拼成一页（无行列标题，不写入配置文件）
+  function buildSearchPage(q) {
+    const query = trim(q).toLowerCase();
+    if (!query) return null;
+    const compact = compactQuery(query);
+    const hits = [];
+    state.pages.forEach((p) => {
+      Object.keys(p.cells).forEach((key) => {
+        (p.cells[key].items || []).forEach((it) => {
+          if (matchItem(it, query, compact)) {
+            hits.push({ item: it, from: p.name || '', pageId: p.id, key });
+          }
+        });
+      });
     });
+
+    const base = {
+      id: SEARCH_PAGE_ID,
+      name: '搜索结果',
+      hideHeads: true,
+      layout: { gap: 10 },
+      hitCount: hits.length,
+      pageCount: new Set(hits.map((h) => h.pageId)).size,
+      hits,
+    };
+
+    if (!hits.length) {
+      return Object.assign(base, { rows: [], cols: [], cells: {}, emptyText: '没有匹配的快捷方式' });
+    }
+
+    // 依据窗口宽度自动排布成宫格，避免出现横向滚动
+    const gap = 10;
+    const cellW = 96;
+    const avail = Math.max(320, (el.canvas ? el.canvas.clientWidth : 900) - 24);
+    const perRow = Math.max(1, Math.floor((avail + gap) / (cellW + gap)));
+    const rowCount = Math.ceil(hits.length / perRow);
+
+    const cols = Array.from({ length: perRow }, (_, i) => ({ id: 'sc' + i, name: '', color: '#5b6b7c', width: cellW }));
+    const rows = Array.from({ length: rowCount }, (_, i) => ({ id: 'sr' + i, name: '', color: '#5b6b7c', height: 80 }));
+
+    const cells = {};
+    hits.forEach((h, i) => {
+      const r = Math.floor(i / perRow);
+      const c = i % perRow;
+      cells[Grid.cellKey('sr' + r, 'sc' + c)] = { items: [h.item], from: h.from };
+    });
+
+    return Object.assign(base, { rows, cols, cells });
+  }
+
+  function runSearch() {
+    const q = trim(ui.q);
+    ui.searchPage = q ? buildSearchPage(q) : null;
+    if (ui.searchPage) ui.activeCell = null;
+    render();
+    if (ui.searchPage && el.canvas) {
+      el.canvas.scrollTop = 0;
+      el.canvas.scrollLeft = 0;
+    }
+  }
+
+  // 退出搜索并回到真实页；clearInput 控制是否同时清空输入框文字
+  function exitSearch(clearInput) {
+    const was = !!ui.searchPage;
+    ui.searchPage = null;
+    ui.q = '';
+    if (clearInput) {
+      const s = $('search');
+      if (s) s.value = '';
+    }
+    return was;
+  }
+
+  function findSearchHit(itemId) {
+    const sp = ui.searchPage;
+    if (!sp) return null;
+    return (sp.hits || []).find((h) => h.item.id === itemId) || null;
   }
 
   function updateStatusHint() {
-    const p = curPage();
-    const total = Object.keys(p.cells).reduce((n, k) => n + ((p.cells[k].items || []).length), 0);
-    const rows = p.rows.length;
-    const cols = p.cols.length;
     el.hint.innerHTML = '';
-    [
-      rows + ' 行 · ' + cols + ' 列 · ' + total + ' 个图标',
-      state.settings.launch === 'double' ? '双击启动' : '单击启动',
-      '拖动图标到别的格子即可成组',
-      '拖动表头把手可整行/整列移动',
-    ].forEach((txt, i) => {
+    let parts;
+    if (ui.searchPage) {
+      const sp = ui.searchPage;
+      parts = [
+        sp.hitCount
+          ? '「' + trim(ui.q) + '」命中 ' + sp.hitCount + ' 个图标 · 来自 ' + sp.pageCount + ' 个页面'
+          : '「' + trim(ui.q) + '」没有找到匹配的快捷方式',
+        '双击启动 · 右键可打开所在页面',
+        '按 Esc 或清空输入退出搜索',
+      ];
+    } else {
+      const p = curPage();
+      const total = Object.keys(p.cells).reduce((n, k) => n + ((p.cells[k].items || []).length), 0);
+      parts = [
+        p.rows.length + ' 行 · ' + p.cols.length + ' 列 · ' + total + ' 个图标',
+        state.settings.launch === 'double' ? '双击启动' : '单击启动',
+        '拖动图标到别的格子即可成组',
+        '拖动表头把手可整行/整列移动',
+      ];
+    }
+    parts.forEach((txt, i) => {
       if (i) {
         const dot = document.createElement('i');
         el.hint.appendChild(dot);
@@ -834,9 +970,23 @@
   function renderSidebar() {
     if (!el.pageList) return;
     el.pageList.innerHTML = '';
+
+    // 搜索时在顶部插入一个临时的「搜索结果」页项（不是真实页）
+    if (ui.searchPage) {
+      const b = document.createElement('button');
+      b.className = 'page-item search-item active';
+      b.title = '搜索结果：继续在搜索框里输入';
+      const name = document.createElement('span');
+      name.className = 'page-name';
+      name.textContent = '搜索结果 (' + ui.searchPage.hitCount + ')';
+      b.appendChild(name);
+      b.addEventListener('click', () => { const s = $('search'); if (s) s.focus(); });
+      el.pageList.appendChild(b);
+    }
+
     state.pages.forEach((p) => {
       const b = document.createElement('button');
-      b.className = 'page-item' + (p.id === state.activePage ? ' active' : '');
+      b.className = 'page-item' + (p.id === state.activePage && !ui.searchPage ? ' active' : '');
       b.dataset.id = p.id;
       const name = document.createElement('span');
       name.className = 'page-name';
@@ -856,7 +1006,12 @@
   }
 
   function switchPage(id) {
-    if (id === state.activePage) return;
+    // 从搜索结果页切到真实页：先退出搜索，再切换
+    const wasSearch = exitSearch(true);
+    if (id === state.activePage) {
+      if (wasSearch) render();
+      return;
+    }
     state.activePage = id;
     ui.activeCell = firstCellKey();
     scheduleSave();
@@ -1075,6 +1230,22 @@
           render();
         },
       },
+    ]);
+  }
+
+  // 搜索结果里的图标右键：可打开、回到所在页面编辑
+  function openSearchItemMenu(itemId, x, y) {
+    const hit = findSearchHit(itemId);
+    if (!hit) return;
+    const item = hit.item;
+    openMenu(x, y, [
+      { label: '打开', action: () => launchItem(item) },
+      { label: '打开所在页面', action: () => switchPage(hit.pageId) },
+      { sep: true },
+      { label: '编辑', action: () => { switchPage(hit.pageId); openItemDialog(hit.key, item); } },
+      item.target && (item.target.indexOf('\\') >= 0 || item.target.indexOf('/') >= 0)
+        ? { label: '在资源管理器中显示', action: () => api.reveal(item.target) }
+        : { sep: true },
     ]);
   }
 
@@ -1718,11 +1889,11 @@
       });
     }
 
-    // 搜索
+    // 搜索：全局搜索所有页，结果渲染成一个独立的临时「搜索结果」页
     const search = $('search');
     search.addEventListener('input', () => {
       ui.q = search.value;
-      applyFilter();
+      runSearch();
     });
 
     // 工具栏：图标大小（行高列宽按基准 54px↔80×80 等比联动）
@@ -1797,6 +1968,16 @@
     el.grid.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
 
+      // 搜索结果页是只读的：只允许点按启动，不能拖拽 / 添加
+      if (ui.searchPage) {
+        const iconNode = e.target.closest('.icon');
+        if (iconNode) {
+          const hit = findSearchHit(iconNode.dataset.item);
+          if (hit) handleIconTap(hit.item);
+        }
+        return;
+      }
+
       const grip = e.target.closest('.grip');
       if (grip) {
         const head = grip.closest('[data-axis]');
@@ -1835,6 +2016,14 @@
 
     el.grid.addEventListener('contextmenu', (e) => {
       e.preventDefault();
+
+      // 搜索结果页：右键打开所在页面
+      if (ui.searchPage) {
+        const iconNode = e.target.closest('.icon');
+        if (iconNode) openSearchItemMenu(iconNode.dataset.item, e.clientX, e.clientY);
+        return;
+      }
+
       const head = e.target.closest('[data-axis]');
       if (head) {
         openHeaderMenu(head.dataset.axis, head.dataset.id, e.clientX, e.clientY);
@@ -1872,6 +2061,7 @@
       if (!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'))) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'copy';
+      if (ui.searchPage) return;
       const cell = e.target.closest('.cell');
       if (cell) cell.classList.add('drop-hover');
     });
@@ -1881,6 +2071,11 @@
     });
     el.canvas.addEventListener('drop', (e) => {
       e.preventDefault();
+      // 搜索结果页只读：不允许把文件加进去
+      if (ui.searchPage) {
+        toast('搜索结果页不能添加图标，按 Esc 退出搜索后再拖入', 'err');
+        return;
+      }
       const cell = e.target.closest('.cell');
       const key = cell ? cell.dataset.key : (ui.activeCell || firstCellKey());
       clearHighlight();
@@ -1923,8 +2118,8 @@
       if (e.key === 'Escape') {
         closeMenu();
         if (!el.overlay.classList.contains('hidden')) closeDialog();
-        // 搜索框内 Esc：清空并收起为按钮
-        if (document.activeElement === search) {
+        // 搜索框内 Esc 或正处于搜索结果页：清空并退出搜索
+        if (document.activeElement === search || ui.searchPage) {
           toggleSearch(false);
           search.blur();
         }
@@ -1936,6 +2131,7 @@
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
         if (el.overlay.classList.contains('hidden')) {
           e.preventDefault();
+          if (ui.searchPage) { toast('搜索结果页不能添加图标，按 Esc 退出搜索后再试', 'err'); return; }
           openItemDialog(ui.activeCell || firstCellKey(), null);
         }
       }
@@ -1959,7 +2155,7 @@
     }, 300);
   }
 
-  // 标题栏搜索：搜索按钮展开成输入框，收起时清空过滤
+  // 标题栏搜索：搜索按钮展开成输入框；收起时退出搜索并恢复真实页
   function toggleSearch(force) {
     const show = force === true ? true : force === false ? false : el.tbSearch.classList.contains('hidden');
     el.tbSearch.classList.toggle('hidden', !show);
@@ -1967,10 +2163,10 @@
     const search = $('search');
     if (show) {
       setTimeout(() => search.focus(), 20);
-    } else if (search.value) {
+    } else {
       search.value = '';
-      ui.q = '';
-      applyFilter();
+      const was = exitSearch(false);
+      if (was) render();
     }
   }
 

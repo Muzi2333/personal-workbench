@@ -139,6 +139,13 @@ body {
 .page-item.active { background: rgba(91, 157, 255, 0.16); color: #cfe1ff; }
 .page-item.is-dragging { opacity: 0.35; }
 .page-item.drop-hover { background: rgba(91, 157, 255, 0.28); color: #fff; outline: 1px solid var(--accent); }
+/* 搜索结果临时页项：与真实页区分，虚线描边 */
+.page-item.search-item {
+  color: #cfe1ff;
+  background: rgba(91, 157, 255, 0.12);
+  outline: 1px dashed rgba(91, 157, 255, 0.5);
+  outline-offset: -1px;
+}
 
 .page-name {
   display: block;
@@ -369,6 +376,24 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .cell:hover { border-color: #3f4346; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22); }
 .cell.drop-hover { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent) inset; }
 .cell.dim { opacity: 0.24; }
+
+/* 搜索结果页：格子左上角标注图标来自哪个页 */
+.cell-note {
+  position: absolute;
+  top: 3px;
+  left: 4px;
+  max-width: calc(100% - 8px);
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.42);
+  color: #9fb4cc;
+  font-size: 9.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
 
 /* 驻足合并预览（安卓式）：accent 内描边 + 目标图标脉冲 */
 .cell.merge-hover {

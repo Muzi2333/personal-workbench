@@ -27,7 +27,7 @@
 | 🎯 **拖拽手势** | 跨格移动 / 跨页拖拽（悬停页项切页）/ Ctrl 复制；落单图标格**快速松手=互换**，**驻足 700ms=合并成组**（安卓式交互 + 合并预览动画） |
 | ↩️ **撤销** | `Ctrl+Z` 逐步撤回几乎所有操作（增删行列/页、移动互换、编辑、样式、滑块、拖入文件等），历史上限可在菜单设置（默认 100 条，0=关闭） |
 | 🖼️ **高清图标** | 自动提取 256px 程序图标并缓存；支持 emoji / 自定义图片 / 自动识别；**网址快捷方式自动抓取网站 favicon，并下载为本地数据缓存（之后启动不再联网，离线也可见）** |
-| 🔍 **实时搜索** | 顶栏内联搜索，命中项高亮、未命中淡化 |
+| 🔍 **全局搜索** | 顶栏内联搜索，**跨所有页面**查找；结果单独渲染成一张临时「搜索结果」页（无行列标题、按窗口宽度自动排布、标注图标来自哪一页），点 Esc / 清空 / 切页即退出；支持中文包含、**全拼音**、**首字母 / 首拼**、英文单词首字母（`vsc`）与**子序列模糊匹配**（`wxn` → 微信） |
 | 📑 **分页管理** | 左侧边栏多页切换，悬停临时展开，右键添加页面 |
 | 🖱️ **桌面拖入** | 直接从桌面把程序 / 文件拖进格子自动生成快捷方式 |
 | 🔔 **托盘常驻** | 关窗进托盘不退出；单实例运行，再次启动仅唤出窗口；开机自启开关（托盘右键） |
@@ -75,6 +75,7 @@ npm start
 | 运行时 | **Electron 33** | 主进程 + `contextBridge` 安全桥，`webUtils.getPathForFile` 取拖入文件路径 |
 | 渲染层 | **原生 H5 / CSS / JS** | 零框架、零构建，IIFE + 全局命名空间（`file://` 下禁用 ESM） |
 | 图标提取 | PowerShell `SHDefExtractIconW` | 提取 256px 高清图标，失败回退 `app.getFileIcon` |
+| 拼音匹配 | **pinyin-pro**（本地 UMD 包） | 全拼 / 首字母 / 模糊搜索，离线可用，随安装包一起分发 |
 | 数据持久化 | `%APPDATA%\workbench\data.json` | 原子写 + `.backup.json` 备份，支持导入 / 导出 |
 | 打包 | **electron-builder** | NSIS 安装包，自定义安装目录 + 桌面 / 开始菜单快捷方式 |
 
@@ -89,15 +90,19 @@ personal-workbench/
 ├─ package.json          含 electron-builder 打包配置
 ├─ 启动工作台.bat         开发态一键启动（移动目录后仍可用）
 ├─ assets/
-│  ├─ icon.png / .ico    应用图标（任务栏 / 安装器）
-│  └─ tray.png           托盘图标
+│  ├─ icon.png / .ico    应用图标（任务栏 / 安装器，蓝色圆角方块 + 2×2 宫格）
+│  └─ tray.png           托盘图标（同款设计，32×32）
 ├─ renderer/
 │  ├─ index.html         页面结构
 │  ├─ style.css          Win11 深色主题样式
-│  ├─ grid.js            宫格渲染引擎（纯 DOM）
-│  └─ app.js             状态管理 + 全部交互
+│  ├─ grid.js            宫格渲染引擎（纯 DOM，支持无表头的搜索结果页）
+│  ├─ app.js             状态管理 + 全部交互（含全局搜索）
+│  └─ vendor/
+│     └─ pinyin-pro.js   pinyin-pro 本地 UMD 包（离线拼音匹配）
 └─ tools/
    ├─ preview-server.js  浏览器预览静态服务器
+   ├─ gen-app-icon.js    生成 icon.png / icon.ico（纯 Node 绘图）
+   ├─ gen-tray-icon.js   生成 tray.png
    └─ test-main.js       主进程 IPC 冒烟测试
 ```
 
@@ -148,6 +153,9 @@ node tools\test-main.js
 # 语法检查
 node --check main.js
 node --check renderer\app.js
+
+# 重新生成应用图标（蓝色圆角方块 + 2×2 宫格）
+node tools\gen-app-icon.js
 ```
 
 > `renderer/app.js` 开头内置 `fallbackApi()`：检测到非 Electron 环境时用 localStorage 替代 IPC，专门支持浏览器预览。

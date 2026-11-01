@@ -8,6 +8,11 @@ dist/
 *.log
 *.tmp
 
+# 本地产物（与仓库无关的工作目录）
+.trae-html-share-packages/
+.screenshots/
+.uploads/
+
 # 系统
 .DS_Store
 Thumbs.db

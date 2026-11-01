@@ -135,27 +135,33 @@
     if (!cols.length || !rows.length) {
       const empty = document.createElement('div');
       empty.className = 'grid-empty';
-      empty.textContent = '至少需要一行一列：右键画布空白处，或点右上角「⋯」菜单添加';
+      empty.textContent = (page && page.emptyText) || '至少需要一行一列：右键画布空白处，或点右上角「⋯」菜单添加';
       container.style.display = 'block';
       container.appendChild(empty);
       return;
     }
     container.style.display = 'grid';
 
+    // 无表头模式（搜索结果页）：不渲染行列标题，编号从 1 开始
+    const hideHeads = !!(page && page.hideHeads);
+    const offset = hideHeads ? 0 : 1;
+
     const colTpl = cols.map((c) => Math.max(96, c.width || 150) + 'px').join(' ');
     const rowTpl = rows.map((r) => Math.max(96, r.height || 150) + 'px').join(' ');
-    container.style.gridTemplateColumns = `var(--head-w) ${colTpl}`;
-    container.style.gridTemplateRows = `var(--head-h) ${rowTpl}`;
+    container.style.gridTemplateColumns = hideHeads ? colTpl : `var(--head-w) ${colTpl}`;
+    container.style.gridTemplateRows = hideHeads ? rowTpl : `var(--head-h) ${rowTpl}`;
 
     // 左上角
-    const corner = document.createElement('div');
-    corner.className = 'corner';
-    corner.style.gridColumn = '1';
-    corner.style.gridRow = '1';
-    container.appendChild(corner);
+    if (!hideHeads) {
+      const corner = document.createElement('div');
+      corner.className = 'corner';
+      corner.style.gridColumn = '1';
+      corner.style.gridRow = '1';
+      container.appendChild(corner);
+    }
 
     // 列头
-    cols.forEach((col, i) => {
+    if (!hideHeads) cols.forEach((col, i) => {
       const h = document.createElement('div');
       h.className = 'col-head';
       h.dataset.axis = 'col';
@@ -181,38 +187,42 @@
 
     // 行头 + 单元格
     rows.forEach((row, j) => {
-      const rh = document.createElement('div');
-      rh.className = 'row-head';
-      rh.dataset.axis = 'row';
-      rh.dataset.id = row.id;
-      rh.style.gridColumn = '1';
-      rh.style.gridRow = String(j + 2);
-      const bg = row.color || '#5b6b7c';
-      rh.style.background = bg;
-      rh.style.color = contrastColor(bg);
+      if (!hideHeads) {
+        const rh = document.createElement('div');
+        rh.className = 'row-head';
+        rh.dataset.axis = 'row';
+        rh.dataset.id = row.id;
+        rh.style.gridColumn = '1';
+        rh.style.gridRow = String(j + 2);
+        const bg = row.color || '#5b6b7c';
+        rh.style.background = bg;
+        rh.style.color = contrastColor(bg);
 
-      const grip = document.createElement('span');
-      grip.className = 'grip';
-      grip.dataset.grip = 'row';
-      grip.title = '拖动调整行顺序';
+        const grip = document.createElement('span');
+        grip.className = 'grip';
+        grip.dataset.grip = 'row';
+        grip.title = '拖动调整行顺序';
 
-      const name = document.createElement('span');
-      name.className = 'hname';
-      name.textContent = row.name || '未命名';
+        const name = document.createElement('span');
+        name.className = 'hname';
+        name.textContent = row.name || '未命名';
 
-      rh.append(grip, name);
-      container.appendChild(rh);
+        rh.append(grip, name);
+        container.appendChild(rh);
+      }
 
       cols.forEach((col, i) => {
         const key = cellKey(row.id, col.id);
         const cell = getCell(page, key, false) || { items: [] };
+        // 搜索结果页：末尾不足一行的空位不渲染占位格子
+        if (hideHeads && !(cell.items || []).length) return;
         const c = document.createElement('div');
         c.className = 'cell';
         c.dataset.key = key;
         c.dataset.row = row.id;
         c.dataset.col = col.id;
-        c.style.gridColumn = String(i + 2);
-        c.style.gridRow = String(j + 2);
+        c.style.gridColumn = String(i + 1 + offset);
+        c.style.gridRow = String(j + 1 + offset);
 
         const st = cell.style || {};
         if (st.bg) c.style.background = st.bg;
@@ -228,6 +238,14 @@
           c.appendChild(mark);
         } else if (items.length === 1) {
           c.appendChild(iconEl(items[0], state));
+          // 搜索结果页：标注这个图标来自哪个页
+          if (cell.from) {
+            const note = document.createElement('span');
+            note.className = 'cell-note';
+            note.textContent = cell.from;
+            note.title = '来自页面：' + cell.from;
+            c.appendChild(note);
+          }
         } else {
           c.appendChild(folderEl(cell, state));
         }
