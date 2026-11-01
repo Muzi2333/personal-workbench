@@ -111,14 +111,14 @@
     if (!cols.length || !rows.length) {
       const empty = document.createElement('div');
       empty.className = 'grid-empty';
-      empty.textContent = '至少需要一行一列，点右上角「添加行 / 添加列」开始吧';
+      empty.textContent = '至少需要一行一列：右键画布空白处，或点右上角「⋯」菜单添加';
       container.style.display = 'block';
       container.appendChild(empty);
       return;
     }
     container.style.display = 'grid';
 
-    const colTpl = cols.map((c) => Math.max(110, c.width || 240) + 'px').join(' ');
+    const colTpl = cols.map((c) => Math.max(96, c.width || 150) + 'px').join(' ');
     const rowTpl = rows.map((r) => Math.max(96, r.height || 150) + 'px').join(' ');
     container.style.gridTemplateColumns = `var(--head-w) ${colTpl}`;
     container.style.gridTemplateRows = `var(--head-h) ${rowTpl}`;

@@ -81,14 +81,14 @@
     const item = (name, target, icon, extra) => mkItem(name, target, icon, extra);
 
     const rows = [
-      { id: 'r1', name: '工作', color: '#5b9dff', height: 156 },
-      { id: 'r2', name: '开发', color: '#a78bfa', height: 156 },
-      { id: 'r3', name: '其他', color: '#4fc08d', height: 156 },
+      { id: 'r1', name: '工作', color: '#5b9dff', height: 150 },
+      { id: 'r2', name: '开发', color: '#a78bfa', height: 150 },
+      { id: 'r3', name: '其他', color: '#4fc08d', height: 150 },
     ];
     const cols = [
-      { id: 'c1', name: '常用', color: '#5b9dff', width: 250 },
-      { id: 'c2', name: '工具', color: '#e3b341', width: 250 },
-      { id: 'c3', name: '随手', color: '#f7786b', width: 250 },
+      { id: 'c1', name: '常用', color: '#5b9dff', width: 150 },
+      { id: 'c2', name: '工具', color: '#e3b341', width: 150 },
+      { id: 'c3', name: '随手', color: '#f7786b', width: 150 },
     ];
 
     const cells = {};
@@ -112,7 +112,7 @@
     put('r3|c3', [item('B 站', 'https://www.bilibili.com', '🎬')]);
 
     return {
-      version: 1,
+      version: 2,
       rows,
       cols,
       cells,
@@ -130,14 +130,21 @@
       id: r.id || 'r' + (i + 1),
       name: r.name || '行 ' + (i + 1),
       color: r.color || '#5b6b7c',
-      height: Number(r.height) || 156,
+      height: Number(r.height) || 150,
     }));
     data.cols = data.cols.map((c, i) => ({
       id: c.id || 'c' + (i + 1),
       name: c.name || '列 ' + (i + 1),
       color: c.color || '#5b6b7c',
-      width: Number(c.width) || 250,
+      width: Number(c.width) || 150,
     }));
+
+    // v1 → v2：所有单元格统一为正方形（150px）
+    if (!data.version || data.version < 2) {
+      data.rows.forEach((r) => { r.height = 150; });
+      data.cols.forEach((c) => { c.width = 150; });
+    }
+    data.version = 2;
 
     data.cells = data.cells && typeof data.cells === 'object' ? data.cells : {};
     Object.keys(data.cells).forEach((k) => {
@@ -297,16 +304,41 @@
     requestIcons();
   }
 
+  // 整格搬运：把 fromKey 格子的全部图标移到 toKey（合并成分组）
+  function moveCellContents(fromKey, toKey, copy) {
+    const src = cellOf(fromKey, false);
+    if (!src || !src.items || !src.items.length) return;
+    const dst = cellOf(toKey, true);
+
+    if (copy) {
+      src.items.forEach((it) => dst.items.push(Object.assign({}, it, { id: Grid.newId('i') })));
+    } else {
+      const wasEmpty = !dst.items.length;
+      src.items.forEach((it) => dst.items.push(it));
+      // 目标格子原本是空的：分组名和格子样式一起搬过去
+      if (wasEmpty) {
+        if (src.name) dst.name = src.name;
+        if (src.style) dst.style = src.style;
+      }
+      delete state.cells[fromKey];
+    }
+
+    scheduleSave();
+    render();
+    requestIcons();
+  }
+
   /* -------------------------------- 拖拽交互 -------------------------------- */
 
   function makeGhost(node) {
     const g = document.createElement('div');
     g.className = 'ghost';
-    const tile = node ? node.querySelector('.tile') : null;
-    if (tile) {
-      const clone = tile.cloneNode(true);
+    // 分组优先取整个缩略堆叠，单个图标取 tile
+    const src = node ? node.querySelector('.folder-stack') || node.querySelector('.tile') : null;
+    if (src) {
+      const clone = src.cloneNode(true);
       g.appendChild(clone);
-      const w = tile.getBoundingClientRect().width || 54;
+      const w = src.getBoundingClientRect().width || 54;
       g.dataset.size = String(w);
     } else {
       g.dataset.size = '54';
@@ -366,6 +398,52 @@
       const toKey = target.dataset.key;
       if (toKey === cellKey) return;
       moveItem(cellKey, itemId, toKey, e.ctrlKey || e.metaKey);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  // 整组拖动：点按 = 展开分组，拖动 = 整格搬运（Ctrl 拖动 = 复制整组）
+  function startFolderDrag(ev, cellKey) {
+    const cell = cellOf(cellKey, false);
+    if (!cell || !cell.items || !cell.items.length) return;
+
+    const node = ev.target.closest('.folder');
+    const startX = ev.clientX;
+    const startY = ev.clientY;
+    let moved = false;
+    let ghost = null;
+
+    const onMove = (e) => {
+      if (!moved) {
+        if (Math.hypot(e.clientX - startX, e.clientY - startY) < 7) return;
+        moved = true;
+        ghost = makeGhost(node);
+        if (node) node.classList.add('is-dragging');
+      }
+      const size = Number(ghost.dataset.size) || 54;
+      ghost.style.transform = 'translate(' + (e.clientX - size / 2) + 'px,' + (e.clientY - size / 2) + 'px)';
+      highlightCell(e.clientX, e.clientY, cellKey);
+    };
+
+    const onUp = (e) => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      if (ghost) ghost.remove();
+      if (node) node.classList.remove('is-dragging');
+      clearHighlight();
+
+      if (!moved) {
+        openFolder(cellKey);
+        return;
+      }
+
+      const target = Grid.cellAt(e.clientX, e.clientY);
+      if (!target) return;
+      const toKey = target.dataset.key;
+      if (toKey === cellKey) return;
+      moveCellContents(cellKey, toKey, e.ctrlKey || e.metaKey);
     };
 
     window.addEventListener('pointermove', onMove);
@@ -439,7 +517,7 @@
       id: Grid.newId('r'),
       name: '行 ' + (idx + 1),
       color: '#5b6b7c',
-      height: 156,
+      height: 150,
     });
     scheduleSave();
     render();
@@ -451,7 +529,7 @@
       id: Grid.newId('c'),
       name: '列 ' + (idx + 1),
       color: '#5b6b7c',
-      width: 250,
+      width: 150,
     });
     scheduleSave();
     render();
@@ -590,6 +668,8 @@
   function openToolbarMenu(x, y) {
     openMenu(x, y, [
       { label: '添加图标', action: () => openItemDialog(ui.activeCell || firstCellKey(), null) },
+      { label: '添加一行', action: () => insertRow(state.rows.length) },
+      { label: '添加一列', action: () => insertCol(state.cols.length) },
       { sep: true },
       { label: state.settings.launch === 'double' ? '启动方式：双击 → 改为单击' : '启动方式：单击 → 改为双击', action: () => {
         state.settings.launch = state.settings.launch === 'double' ? 'single' : 'double';
@@ -873,6 +953,97 @@
     if (!cell || !cell.items || cell.items.length === 0) return;
 
     let body = null;
+
+    // 弹层图标拖拽：层内拖动 = 排序，拖出弹层 = 移到主宫格（Ctrl 拖动 = 复制）
+    const startPopupDrag = (ev, item, node, grid) => {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+
+      const startX = ev.clientX;
+      const startY = ev.clientY;
+      const dialogBox = node.closest('.dialog');
+      let mode = null; // 'reorder' | 'out'
+      let ghost = null;
+      let insertAt = -1;
+
+      const clearMarks = () => {
+        grid.querySelectorAll('.drop-before, .drop-after').forEach((n) => n.classList.remove('drop-before', 'drop-after'));
+      };
+
+      const onMove = (e) => {
+        if (!mode) {
+          if (Math.hypot(e.clientX - startX, e.clientY - startY) < 7) return;
+          mode = 'reorder';
+          ghost = makeGhost(node);
+          node.classList.add('is-dragging');
+        }
+        const size = Number(ghost.dataset.size) || 54;
+        ghost.style.transform = 'translate(' + (e.clientX - size / 2) + 'px,' + (e.clientY - size / 2) + 'px)';
+
+        if (mode === 'reorder') {
+          const r = dialogBox.getBoundingClientRect();
+          const outside = e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+          if (outside) {
+            // 拖出弹层：关闭弹层，露出主宫格继续拖
+            mode = 'out';
+            clearMarks();
+            node.classList.remove('is-dragging');
+            closeDialog();
+          }
+        }
+
+        if (mode === 'reorder') {
+          const icons = Array.from(grid.querySelectorAll('.icon'));
+          insertAt = icons.length;
+          for (let i = 0; i < icons.length; i++) {
+            const r2 = icons[i].getBoundingClientRect();
+            if (e.clientY > r2.bottom) continue;
+            if (e.clientY < r2.top || e.clientX < r2.left + r2.width / 2) { insertAt = i; break; }
+          }
+          clearMarks();
+          if (insertAt < icons.length) icons[insertAt].classList.add('drop-before');
+          else if (icons.length) icons[icons.length - 1].classList.add('drop-after');
+        } else {
+          highlightCell(e.clientX, e.clientY, key);
+        }
+      };
+
+      const onUp = (e) => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        if (ghost) ghost.remove();
+        clearHighlight();
+        clearMarks();
+
+        if (!mode) { launchItem(item); return; }
+
+        if (mode === 'reorder') {
+          node.classList.remove('is-dragging');
+          const cur = cellOf(key, false);
+          if (!cur) return;
+          const from = cur.items.findIndex((i) => i.id === item.id);
+          if (from < 0 || insertAt < 0 || insertAt === from || insertAt === from + 1) return;
+          const it = cur.items.splice(from, 1)[0];
+          cur.items.splice(insertAt > from ? insertAt - 1 : insertAt, 0, it);
+          scheduleSave();
+          render();
+          rebuild();
+          return;
+        }
+
+        // mode === 'out'：落到主宫格
+        const target = Grid.cellAt(e.clientX, e.clientY);
+        if (target && target.dataset.key !== key) {
+          moveItem(key, item.id, target.dataset.key, e.ctrlKey || e.metaKey);
+        } else {
+          render();
+        }
+      };
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    };
+
     const rebuild = () => {
       const cur = cellOf(key, false);
       if (!cur || !cur.items.length) { closeDialog(); return; }
@@ -907,7 +1078,7 @@
         lb.textContent = item.name || '';
         node.appendChild(lb);
 
-        node.addEventListener('click', () => launchItem(item));
+        node.addEventListener('pointerdown', (e) => startPopupDrag(e, item, node, grid));
         node.addEventListener('contextmenu', (e) => {
           e.preventDefault();
           openMenu(e.clientX, e.clientY, [
@@ -978,10 +1149,6 @@
     });
 
     // 工具栏
-    $('btn-add-item').addEventListener('click', () => openItemDialog(ui.activeCell || firstCellKey(), null));
-    $('btn-add-row').addEventListener('click', () => insertRow(state.rows.length));
-    $('btn-add-col').addEventListener('click', () => insertCol(state.cols.length));
-
     const size = $('icon-size');
     size.value = String(state.settings.iconSize || 54);
     size.addEventListener('input', () => {
@@ -1018,20 +1185,21 @@
 
       const folder = e.target.closest('.folder');
       if (folder) {
+        startFolderDrag(e, cell.dataset.key);
+        return;
+      }
+
+      // 空白格单击 = 添加图标
+      if (cell.classList.contains('is-empty')) {
+        const key = cell.dataset.key;
         const x = e.clientX;
         const y = e.clientY;
         const onUp = (ev) => {
           window.removeEventListener('pointerup', onUp);
-          if (Math.hypot(ev.clientX - x, ev.clientY - y) < 7) openFolder(cell.dataset.key);
+          if (Math.hypot(ev.clientX - x, ev.clientY - y) < 7) openItemDialog(key, null);
         };
         window.addEventListener('pointerup', onUp);
       }
-    });
-
-    el.grid.addEventListener('dblclick', (e) => {
-      const cell = e.target.closest('.cell');
-      if (!cell) return;
-      if (cell.classList.contains('is-empty')) openItemDialog(cell.dataset.key, null);
     });
 
     el.grid.addEventListener('contextmenu', (e) => {
