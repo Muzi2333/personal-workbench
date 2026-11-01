@@ -20,8 +20,20 @@
     const icon = item.icon || {};
     if (icon.type === 'emoji' && icon.value) return { kind: 'emoji', value: icon.value };
     if (icon.type === 'image' && icon.value) return { kind: 'image', value: icon.value };
+    if (icon.type === 'file' && icon.value) {
+      // 用户指定的图标文件（.ico/.exe/.dll），由主进程提取后走 iconCache
+      const fsrc = state.iconCache && state.iconCache[icon.value];
+      return { kind: 'file', src: fsrc || null, target: icon.value };
+    }
     const src = item.target ? state.iconCache && state.iconCache[item.target] : null;
     return { kind: 'auto', src: src || null, target: item.target || '' };
+  }
+
+  // 本地路径 → file:// URL（供 <img> 加载用户自定义图片图标）
+  function toFileUrl(p) {
+    if (!p) return '';
+    if (/^(file:|https?:|data:)/i.test(p)) return p;
+    return 'file:///' + String(p).replace(/\\/g, '/');
   }
 
   function tile(item, state) {
@@ -38,9 +50,9 @@
       const img = document.createElement('img');
       img.alt = '';
       img.draggable = false;
-      img.src = info.value || info.src || EMPTY_PX;
+      img.src = info.kind === 'image' ? toFileUrl(info.value) : info.src || EMPTY_PX;
       if (info.target) img.dataset.iconTarget = info.target;
-      if (!info.src && info.kind === 'auto') img.classList.add('is-placeholder');
+      if (!info.src && (info.kind === 'auto' || info.kind === 'file')) img.classList.add('is-placeholder');
       img.addEventListener('error', () => img.classList.add('is-placeholder'));
       t.appendChild(img);
     }
@@ -99,10 +111,10 @@
     return box;
   }
 
-  function render(container, state) {
-    const cols = state.cols || [];
-    const rows = state.rows || [];
-    const gap = (state.layout && state.layout.gap) || 10;
+  function render(container, page, state) {
+    const cols = (page && page.cols) || [];
+    const rows = (page && page.rows) || [];
+    const gap = (page && page.layout && page.layout.gap) || 10;
 
     container.innerHTML = '';
     container.style.setProperty('--gap', gap + 'px');
@@ -183,7 +195,7 @@
 
       cols.forEach((col, i) => {
         const key = cellKey(row.id, col.id);
-        const cell = getCell(state, key, false) || { items: [] };
+        const cell = getCell(page, key, false) || { items: [] };
         const c = document.createElement('div');
         c.className = 'cell';
         c.dataset.key = key;
@@ -220,5 +232,5 @@
     return el ? el.closest('.cell') : null;
   }
 
-  window.Grid = { newId, cellKey, getCell, render, cellAt, iconInfo };
+  window.Grid = { newId, cellKey, getCell, render, cellAt, iconInfo, tile, toFileUrl };
 })();

@@ -222,8 +222,18 @@ ipcMain.handle('target:launch', async (_e, payload) => {
 
 ipcMain.handle('target:icon', async (_e, filePath) => {
   try {
-    if (!filePath || !fs.existsSync(filePath)) return null;
-    const img = await app.getFileIcon(filePath, { size: 'large' });
+    if (!filePath) return null;
+    let iconSource = filePath;
+    // 快捷方式：解析出自定义图标或真实目标，否则只能拿到通用快捷方式图标
+    if (/\.lnk$/i.test(filePath) && fs.existsSync(filePath)) {
+      try {
+        const link = shell.readShortcutLink(filePath);
+        if (link.icon && fs.existsSync(link.icon)) iconSource = link.icon;
+        else if (link.target && fs.existsSync(link.target)) iconSource = link.target;
+      } catch (_) {}
+    }
+    if (!fs.existsSync(iconSource)) return null;
+    const img = await app.getFileIcon(iconSource, { size: 'large' });
     if (!img || img.isEmpty()) return null;
     return img.toDataURL();
   } catch (err) {

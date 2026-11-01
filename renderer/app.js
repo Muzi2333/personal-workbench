@@ -112,65 +112,95 @@
     put('r3|c3', [item('B 站', 'https://www.bilibili.com', '🎬')]);
 
     return {
-      version: 2,
-      rows,
-      cols,
-      cells,
-      settings: { iconSize: 54, showLabels: true, launch: 'double' },
-      layout: { gap: 10 },
+      version: 3,
+      pages: [{ id: 'p1', name: '主页', rows, cols, cells, layout: { gap: 10 } }],
+      activePage: 'p1',
+      settings: { iconSize: 54, showLabels: true, launch: 'double', sidebar: true },
       iconCache: {},
     };
   }
 
   function normalize(data) {
     if (!data || typeof data !== 'object') return null;
-    if (!Array.isArray(data.rows) || !Array.isArray(data.cols)) return null;
 
-    data.rows = data.rows.map((r, i) => ({
-      id: r.id || 'r' + (i + 1),
-      name: r.name || '行 ' + (i + 1),
-      color: r.color || '#5b6b7c',
-      height: Number(r.height) || 150,
-    }));
-    data.cols = data.cols.map((c, i) => ({
-      id: c.id || 'c' + (i + 1),
-      name: c.name || '列 ' + (i + 1),
-      color: c.color || '#5b6b7c',
-      width: Number(c.width) || 150,
-    }));
+    // v2 → v3：单页结构包装为 pages 数组
+    if (!Array.isArray(data.pages)) {
+      if (!Array.isArray(data.rows) || !Array.isArray(data.cols)) return null;
+      data.pages = [{
+        id: 'p1',
+        name: '主页',
+        rows: data.rows,
+        cols: data.cols,
+        cells: data.cells || {},
+        layout: data.layout || { gap: 10 },
+      }];
+      delete data.rows;
+      delete data.cols;
+      delete data.cells;
+      delete data.layout;
+      data.activePage = 'p1';
+    }
+    if (!data.pages.length) return null;
+
+    data.pages.forEach((p, pi) => {
+      p.id = p.id || 'p' + (pi + 1);
+      p.name = p.name || '第 ' + (pi + 1) + ' 页';
+      p.rows = (Array.isArray(p.rows) ? p.rows : []).map((r, i) => ({
+        id: r.id || 'r' + (i + 1),
+        name: r.name || '行 ' + (i + 1),
+        color: r.color || '#5b6b7c',
+        height: Number(r.height) || 150,
+      }));
+      p.cols = (Array.isArray(p.cols) ? p.cols : []).map((c, i) => ({
+        id: c.id || 'c' + (i + 1),
+        name: c.name || '列 ' + (i + 1),
+        color: c.color || '#5b6b7c',
+        width: Number(c.width) || 150,
+      }));
+      p.cells = p.cells && typeof p.cells === 'object' ? p.cells : {};
+      Object.keys(p.cells).forEach((k) => {
+        const c = p.cells[k] || {};
+        c.items = Array.isArray(c.items) ? c.items : [];
+        p.cells[k] = c;
+      });
+      p.layout = Object.assign({ gap: 10 }, p.layout || {});
+    });
 
     // v1 → v2：所有单元格统一为正方形（150px）
     if (!data.version || data.version < 2) {
-      data.rows.forEach((r) => { r.height = 150; });
-      data.cols.forEach((c) => { c.width = 150; });
+      data.pages.forEach((p) => {
+        p.rows.forEach((r) => { r.height = 150; });
+        p.cols.forEach((c) => { c.width = 150; });
+      });
     }
-    data.version = 2;
+    data.version = 3;
 
-    data.cells = data.cells && typeof data.cells === 'object' ? data.cells : {};
-    Object.keys(data.cells).forEach((k) => {
-      const c = data.cells[k] || {};
-      c.items = Array.isArray(c.items) ? c.items : [];
-      data.cells[k] = c;
-    });
+    if (!data.pages.some((p) => p.id === data.activePage)) data.activePage = data.pages[0].id;
 
-    data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double' }, data.settings || {});
-    data.layout = Object.assign({ gap: 10 }, data.layout || {});
+    data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true }, data.settings || {});
     data.iconCache = data.iconCache || {};
     return data;
   }
 
+  // 当前页：所有行列/格子操作的入口
+  function curPage() {
+    return state.pages.find((p) => p.id === state.activePage) || state.pages[0];
+  }
+
   function cellOf(key, create) {
-    return Grid.getCell(state, key, create);
+    return Grid.getCell(curPage(), key, create);
   }
 
   function cleanupCell(key) {
-    const c = state.cells[key];
-    if (c && (!c.items || !c.items.length)) delete state.cells[key];
+    const cells = curPage().cells;
+    const c = cells[key];
+    if (c && (!c.items || !c.items.length)) delete cells[key];
   }
 
   function firstCellKey() {
-    if (!state.rows.length || !state.cols.length) return null;
-    return Grid.cellKey(state.rows[0].id, state.cols[0].id);
+    const p = curPage();
+    if (!p.rows.length || !p.cols.length) return null;
+    return Grid.cellKey(p.rows[0].id, p.cols[0].id);
   }
 
   /* --------------------------------- 渲染 --------------------------------- */
@@ -179,19 +209,21 @@
     const canvas = el.canvas;
     const sx = canvas.scrollLeft;
     const sy = canvas.scrollTop;
-    Grid.render(el.grid, state);
+    Grid.render(el.grid, curPage(), state);
     canvas.scrollLeft = sx;
     canvas.scrollTop = sy;
     applyFilter();
     updateStatusHint();
+    renderSidebar();
   }
 
   function applyFilter() {
     const q = ui.q.trim().toLowerCase();
+    const pageCells = curPage().cells;
     const cells = el.grid.querySelectorAll('.cell');
     cells.forEach((cell) => {
       const key = cell.dataset.key;
-      const items = (state.cells[key] && state.cells[key].items) || [];
+      const items = (pageCells[key] && pageCells[key].items) || [];
       if (!q) {
         cell.classList.remove('dim');
         cell.querySelectorAll('.icon, .folder').forEach((n) => { n.style.display = ''; });
@@ -207,9 +239,10 @@
   }
 
   function updateStatusHint() {
-    const total = Object.keys(state.cells).reduce((n, k) => n + ((state.cells[k].items || []).length), 0);
-    const rows = state.rows.length;
-    const cols = state.cols.length;
+    const p = curPage();
+    const total = Object.keys(p.cells).reduce((n, k) => n + ((p.cells[k].items || []).length), 0);
+    const rows = p.rows.length;
+    const cols = p.cols.length;
     el.hint.innerHTML = '';
     [
       rows + ' 行 · ' + cols + ' 列 · ' + total + ' 个图标',
@@ -229,10 +262,12 @@
 
   async function requestIcons() {
     const targets = new Set();
-    Object.keys(state.cells).forEach((key) => {
-      (state.cells[key].items || []).forEach((it) => {
+    const pageCells = curPage().cells;
+    Object.keys(pageCells).forEach((key) => {
+      (pageCells[key].items || []).forEach((it) => {
         const type = it.icon && it.icon.type ? it.icon.type : 'auto';
         if (type === 'auto' && it.target && !state.iconCache[it.target]) targets.add(it.target);
+        if (type === 'file' && it.icon.value && !state.iconCache[it.icon.value]) targets.add(it.icon.value);
       });
     });
     if (!targets.size) return;
@@ -320,7 +355,7 @@
         if (src.name) dst.name = src.name;
         if (src.style) dst.style = src.style;
       }
-      delete state.cells[fromKey];
+      delete curPage().cells[fromKey];
     }
 
     scheduleSave();
@@ -455,7 +490,8 @@
     ev.stopPropagation();
 
     const id = headEl.dataset.id;
-    const list = axis === 'row' ? state.rows : state.cols;
+    const page = curPage();
+    const list = axis === 'row' ? page.rows : page.cols;
     const from = list.findIndex((x) => x.id === id);
     if (from < 0) return;
 
@@ -512,8 +548,9 @@
   /* --------------------------------- 行列编辑 -------------------------------- */
 
   function insertRow(atIndex) {
-    const idx = Math.max(0, Math.min(atIndex, state.rows.length));
-    state.rows.splice(idx, 0, {
+    const page = curPage();
+    const idx = Math.max(0, Math.min(atIndex, page.rows.length));
+    page.rows.splice(idx, 0, {
       id: Grid.newId('r'),
       name: '行 ' + (idx + 1),
       color: '#5b6b7c',
@@ -524,8 +561,9 @@
   }
 
   function insertCol(atIndex) {
-    const idx = Math.max(0, Math.min(atIndex, state.cols.length));
-    state.cols.splice(idx, 0, {
+    const page = curPage();
+    const idx = Math.max(0, Math.min(atIndex, page.cols.length));
+    page.cols.splice(idx, 0, {
       id: Grid.newId('c'),
       name: '列 ' + (idx + 1),
       color: '#5b6b7c',
@@ -536,23 +574,183 @@
   }
 
   function removeRow(id) {
-    const idx = state.rows.findIndex((r) => r.id === id);
+    const page = curPage();
+    const idx = page.rows.findIndex((r) => r.id === id);
     if (idx < 0) return false;
-    state.rows.splice(idx, 1);
-    Object.keys(state.cells).forEach((k) => { if (k.startsWith(id + '|')) delete state.cells[k]; });
+    page.rows.splice(idx, 1);
+    Object.keys(page.cells).forEach((k) => { if (k.startsWith(id + '|')) delete page.cells[k]; });
     scheduleSave();
     render();
     return true;
   }
 
   function removeCol(id) {
-    const idx = state.cols.findIndex((c) => c.id === id);
+    const page = curPage();
+    const idx = page.cols.findIndex((c) => c.id === id);
     if (idx < 0) return false;
-    state.cols.splice(idx, 1);
-    Object.keys(state.cells).forEach((k) => { if (k.endsWith('|' + id)) delete state.cells[k]; });
+    page.cols.splice(idx, 1);
+    Object.keys(page.cells).forEach((k) => { if (k.endsWith('|' + id)) delete page.cells[k]; });
     scheduleSave();
     render();
     return true;
+  }
+
+  /* --------------------------------- 页管理 --------------------------------- */
+
+  function renderSidebar() {
+    if (!el.pageList) return;
+    el.pageList.innerHTML = '';
+    state.pages.forEach((p) => {
+      const b = document.createElement('button');
+      b.className = 'page-item' + (p.id === state.activePage ? ' active' : '');
+      b.dataset.id = p.id;
+      const name = document.createElement('span');
+      name.className = 'page-name';
+      name.textContent = p.name;
+      b.appendChild(name);
+      b.addEventListener('click', () => {
+        if (ui.suppressPageClick) { ui.suppressPageClick = false; return; }
+        switchPage(p.id);
+      });
+      b.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        openPageMenu(p.id, e.clientX, e.clientY);
+      });
+      b.addEventListener('pointerdown', (e) => startPageDrag(e, p.id, b));
+      el.pageList.appendChild(b);
+    });
+  }
+
+  function switchPage(id) {
+    if (id === state.activePage) return;
+    state.activePage = id;
+    ui.activeCell = firstCellKey();
+    scheduleSave();
+    render();
+    requestIcons();
+  }
+
+  function addPage(atIndex) {
+    const idx = atIndex == null ? state.pages.length : Math.max(0, Math.min(atIndex, state.pages.length));
+    const mkAxis = (prefix, name, size) => [1, 2, 3].map((n) => ({
+      id: Grid.newId(prefix),
+      name: name + ' ' + n,
+      color: '#5b6b7c',
+      [size]: 150,
+    }));
+    const page = {
+      id: Grid.newId('p'),
+      name: '第 ' + (state.pages.length + 1) + ' 页',
+      rows: mkAxis('r', '行', 'height'),
+      cols: mkAxis('c', '列', 'width'),
+      cells: {},
+      layout: { gap: 10 },
+    };
+    state.pages.splice(idx, 0, page);
+    switchPage(page.id);
+    toast('已添加一页', 'ok');
+  }
+
+  function removePage(id) {
+    if (state.pages.length <= 1) { toast('至少保留一页', 'err'); return; }
+    const idx = state.pages.findIndex((p) => p.id === id);
+    if (idx < 0) return;
+    state.pages.splice(idx, 1);
+    if (state.activePage === id) state.activePage = state.pages[Math.max(0, idx - 1)].id;
+    ui.activeCell = firstCellKey();
+    scheduleSave();
+    render();
+    requestIcons();
+    toast('已删除这一页', 'ok');
+  }
+
+  function openPageDialog(id) {
+    const page = state.pages.find((p) => p.id === id);
+    if (!page) return;
+    const body = openDialog({
+      title: '页设置',
+      body: '<div class="field"><label>页名称</label><input class="input" id="pg-name" spellcheck="false"></div>',
+      buttons: [
+        { label: '取消', ghost: true },
+        { label: '保存', primary: true, onClick: () => {
+          page.name = trim(body.querySelector('#pg-name').value) || page.name;
+          scheduleSave();
+          renderSidebar();
+          return true;
+        } },
+      ],
+    });
+    body.querySelector('#pg-name').value = page.name || '';
+  }
+
+  function openPageMenu(id, x, y) {
+    const idx = state.pages.findIndex((p) => p.id === id);
+    if (idx < 0) return;
+    openMenu(x, y, [
+      { label: '重命名', action: () => openPageDialog(id) },
+      { label: '在前面插入一页', action: () => addPage(idx) },
+      { label: '在后面插入一页', action: () => addPage(idx + 1) },
+      { sep: true },
+      { label: '删除这一页', danger: true, action: () => {
+        confirmDialog('删除这一页？', '其中的图标会一起移除。', '删除', () => removePage(id));
+      } },
+    ]);
+  }
+
+  // 页拖拽排序
+  function startPageDrag(ev, id, node) {
+    if (ev.button !== 0) return;
+    const startX = ev.clientX;
+    const startY = ev.clientY;
+    const from = state.pages.findIndex((p) => p.id === id);
+    if (from < 0) return;
+
+    let dragging = false;
+    let to = from;
+    let line = null;
+
+    const onMove = (e) => {
+      if (!dragging) {
+        if (Math.hypot(e.clientX - startX, e.clientY - startY) < 6) return;
+        dragging = true;
+        line = document.createElement('div');
+        line.className = 'drop-line';
+        document.body.appendChild(line);
+        node.classList.add('is-dragging');
+      }
+      const nodes = Array.from(el.pageList.querySelectorAll('.page-item'));
+      const rects = nodes.map((n) => n.getBoundingClientRect());
+      let insert = 0;
+      rects.forEach((r) => { if (e.clientY > r.top + r.height / 2) insert++; });
+      to = insert;
+      const first = rects[0];
+      const last = rects[rects.length - 1];
+      if (first) {
+        const y = insert < rects.length ? rects[insert].top - 4 : last.bottom + 4;
+        line.style.cssText = 'display:block;left:' + first.left + 'px;top:' + y + 'px;width:' + first.width + 'px;height:2px;';
+      }
+    };
+
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      if (line) line.remove();
+      node.classList.remove('is-dragging');
+      if (dragging) {
+        ui.suppressPageClick = true;
+        if (to !== from && to !== from + 1) {
+          const target = to > from ? to - 1 : to;
+          const moved = state.pages.splice(from, 1)[0];
+          state.pages.splice(target, 0, moved);
+          scheduleSave();
+          renderSidebar();
+          toast('已调整页顺序', 'ok');
+        }
+      }
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
   }
 
   /* ---------------------------------- 菜单 ---------------------------------- */
@@ -598,18 +796,19 @@
   }
 
   function openCellMenu(key, x, y) {
+    const page = curPage();
     const cell = cellOf(key, false) || { items: [] };
     const count = (cell.items || []).length;
     openMenu(x, y, [
       { label: '添加图标', sub: '＋', action: () => openItemDialog(key, null) },
       { label: '编辑格子样式', action: () => openCellDialog(key) },
-      count ? { label: '清空这个格子', danger: true, action: () => { delete state.cells[key]; scheduleSave(); render(); } } : { sep: true },
+      count ? { label: '清空这个格子', danger: true, action: () => { delete page.cells[key]; scheduleSave(); render(); } } : { sep: true },
       { label: '插入一行（下方）', action: () => {
-        const r = state.rows.findIndex((row) => row.id === key.split('|')[0]);
+        const r = page.rows.findIndex((row) => row.id === key.split('|')[0]);
         insertRow(r + 1);
       } },
       { label: '插入一列（右侧）', action: () => {
-        const c = state.cols.findIndex((col) => col.id === key.split('|')[1]);
+        const c = page.cols.findIndex((col) => col.id === key.split('|')[1]);
         insertCol(c + 1);
       } },
     ]);
@@ -642,7 +841,8 @@
   }
 
   function openHeaderMenu(axis, id, x, y) {
-    const list = axis === 'row' ? state.rows : state.cols;
+    const page = curPage();
+    const list = axis === 'row' ? page.rows : page.cols;
     const idx = list.findIndex((v) => v.id === id);
     if (idx < 0) return;
     const unit = axis === 'row' ? '行' : '列';
@@ -657,9 +857,10 @@
         danger: true,
         action: () => {
           if (list.length <= 1) { toast('至少保留一' + unit, 'err'); return; }
-          if (!window.confirm('删除这一' + unit + '？其中的图标会一起移除。')) return;
-          if (axis === 'row') removeRow(id);
-          else removeCol(id);
+          confirmDialog('删除这一' + unit + '？', '其中的图标会一起移除。', '删除', () => {
+            if (axis === 'row') removeRow(id);
+            else removeCol(id);
+          });
         },
       },
     ]);
@@ -668,8 +869,9 @@
   function openToolbarMenu(x, y) {
     openMenu(x, y, [
       { label: '添加图标', action: () => openItemDialog(ui.activeCell || firstCellKey(), null) },
-      { label: '添加一行', action: () => insertRow(state.rows.length) },
-      { label: '添加一列', action: () => insertCol(state.cols.length) },
+      { label: '添加一行', action: () => insertRow(curPage().rows.length) },
+      { label: '添加一列', action: () => insertCol(curPage().cols.length) },
+      { label: '增加一页应用', action: () => addPage() },
       { sep: true },
       { label: state.settings.launch === 'double' ? '启动方式：双击 → 改为单击' : '启动方式：单击 → 改为双击', action: () => {
         state.settings.launch = state.settings.launch === 'double' ? 'single' : 'double';
@@ -705,17 +907,30 @@
       { label: '打开数据目录', action: () => api.openDataDir() },
       { sep: true },
       { label: '恢复默认布局', danger: true, action: () => {
-        if (!window.confirm('恢复默认布局？当前配置会被替换。')) return;
-        state = defaults();
-        ui.activeCell = firstCellKey();
-        scheduleSave();
-        render();
-        requestIcons();
+        confirmDialog('恢复默认布局？', '当前配置会被替换。', '恢复', () => {
+          state = defaults();
+          ui.activeCell = firstCellKey();
+          scheduleSave();
+          render();
+          requestIcons();
+        });
       } },
     ]);
   }
 
   /* ---------------------------------- 弹窗 ---------------------------------- */
+
+  // 应用内确认框（Electron 不支持原生 window.confirm）
+  function confirmDialog(title, message, okLabel, onOk) {
+    openDialog({
+      title: title || '确认',
+      body: '<div class="hintline" style="color:var(--text);font-size:13px;margin:2px 0 4px">' + message + '</div>',
+      buttons: [
+        { label: '取消', ghost: true },
+        { label: okLabel || '确定', danger: true, onClick: () => { onOk(); return true; } },
+      ],
+    });
+  }
 
   function openDialog(options) {
     el.dialogTitle.textContent = options.title || '';
@@ -763,6 +978,10 @@
     const editing = !!item;
     const it = item || { name: '', target: '', args: '', cwd: '', icon: { type: 'auto', value: '' } };
     const emojiValue = it.icon && it.icon.type === 'emoji' ? it.icon.value : '';
+    // 用户自定义图标：图片走 image，.ico/.exe/.dll 走 file（主进程提取）
+    let customIcon = it.icon && (it.icon.type === 'image' || it.icon.type === 'file')
+      ? { type: it.icon.type, value: it.icon.value }
+      : null;
 
     const body = openDialog({
       title: editing ? '编辑图标' : '添加图标',
@@ -781,7 +1000,12 @@
         '</div>',
         '<div class="field"><label>图标（留空则自动读取程序图标）</label>',
         '<input class="input" id="f-emoji" placeholder="填一个 emoji，例如 📝" spellcheck="false">',
-        '<div class="emoji-row" id="f-emoji-row"></div></div>',
+        '<div class="emoji-row" id="f-emoji-row"></div>',
+        '<div style="display:flex;gap:8px;align-items:center;margin-top:8px">',
+        '<button class="btn" id="f-icon-browse" style="flex:0 0 auto">浏览图标…</button>',
+        '<span class="hintline" id="f-icon-path" style="margin:0;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>',
+        '<button class="btn ghost" id="f-icon-clear" style="flex:0 0 auto;display:none">清除</button>',
+        '</div></div>',
       ].join(''),
       buttons: [
         { label: '取消', ghost: true },
@@ -824,12 +1048,41 @@
       }
     });
 
+    // 自定义图标：类似 Windows 快捷方式的「更改图标」
+    const fIconPath = body.querySelector('#f-icon-path');
+    const fIconClear = body.querySelector('#f-icon-clear');
+    const refreshIconHint = () => {
+      fIconPath.textContent = customIcon ? '自定义：' + customIcon.value : '';
+      fIconPath.title = customIcon ? customIcon.value : '';
+      fIconClear.style.display = customIcon ? '' : 'none';
+    };
+    refreshIconHint();
+
+    body.querySelector('#f-icon-browse').addEventListener('click', async () => {
+      const res = await api.pick({
+        title: '选择图标文件',
+        filters: [
+          { name: '图标', extensions: ['ico', 'exe', 'dll', 'png', 'jpg', 'jpeg', 'bmp', 'webp'] },
+          { name: '所有文件', extensions: ['*'] },
+        ],
+      });
+      if (res && res.ok) {
+        customIcon = /\.(png|jpe?g|bmp|webp|gif)$/i.test(res.path)
+          ? { type: 'image', value: res.path }
+          : { type: 'file', value: res.path };
+        refreshIconHint();
+      } else if (res && res.error && !res.canceled) {
+        toast(res.error, 'err');
+      }
+    });
+    fIconClear.addEventListener('click', () => { customIcon = null; refreshIconHint(); });
+
     function save() {
       const target = trim(fTarget.value);
       if (!target) { toast('请填写启动目标', 'err'); return false; }
       const name = trim(fName.value) || baseName(target.split('?')[0]);
       const emoji = trim(fEmoji.value);
-      const icon = emoji ? { type: 'emoji', value: emoji } : { type: 'auto', value: '' };
+      const icon = emoji ? { type: 'emoji', value: emoji } : (customIcon || { type: 'auto', value: '' });
 
       if (editing) {
         it.name = name;
@@ -1056,22 +1309,7 @@
         node.className = 'icon';
         node.dataset.item = item.id;
 
-        const tileHost = document.createElement('div');
-        tileHost.className = 'tile';
-        const info = Grid.iconInfo(item, state);
-        if (info.kind === 'emoji') {
-          const sp = document.createElement('span');
-          sp.className = 'emoji';
-          sp.textContent = info.value;
-          tileHost.appendChild(sp);
-        } else {
-          const img = document.createElement('img');
-          img.src = info.src || 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
-          img.alt = '';
-          if (info.target) img.dataset.iconTarget = info.target;
-          tileHost.appendChild(img);
-        }
-        node.appendChild(tileHost);
+        node.appendChild(Grid.tile(item, state));
 
         const lb = document.createElement('span');
         lb.className = 'icon-label';
@@ -1162,6 +1400,20 @@
       openToolbarMenu(rect.right - 190, rect.bottom + 6);
     });
 
+    // 侧边栏显隐
+    $('btn-sidebar').addEventListener('click', () => {
+      const show = state.settings.sidebar === false;
+      state.settings.sidebar = show;
+      el.sidebar.classList.toggle('hidden', !show);
+      scheduleSave();
+    });
+
+    // 搜索栏显隐
+    $('btn-search').addEventListener('click', () => toggleSearch());
+
+    // 增加一页
+    $('page-add').addEventListener('click', () => addPage());
+
     // 宫格事件（委托，重渲染后依然有效）
     el.grid.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
@@ -1212,8 +1464,8 @@
       const cell = e.target.closest('.cell');
       if (!cell) {
         openMenu(e.clientX, e.clientY, [
-          { label: '添加一行', action: () => insertRow(state.rows.length) },
-          { label: '添加一列', action: () => insertCol(state.cols.length) },
+          { label: '添加一行', action: () => insertRow(curPage().rows.length) },
+          { label: '添加一列', action: () => insertCol(curPage().cols.length) },
         ]);
         return;
       }
@@ -1228,7 +1480,7 @@
         openMenu(e.clientX, e.clientY, [
           { label: '展开分组', action: () => openFolder(cell.dataset.key) },
           { label: '编辑格子样式', action: () => openCellDialog(cell.dataset.key) },
-          { label: '清空这个格子', danger: true, action: () => { delete state.cells[cell.dataset.key]; scheduleSave(); render(); } },
+          { label: '清空这个格子', danger: true, action: () => { delete curPage().cells[cell.dataset.key]; scheduleSave(); render(); } },
         ]);
         return;
       }
@@ -1290,10 +1542,18 @@
       if (e.key === 'Escape') {
         closeMenu();
         if (!el.overlay.classList.contains('hidden')) closeDialog();
+        // 搜索框内 Esc：清空并收起搜索栏
+        if (document.activeElement === search) {
+          search.value = '';
+          ui.q = '';
+          applyFilter();
+          el.searchbar.classList.add('hidden');
+          search.blur();
+        }
       }
       if (e.key === '/' && document.activeElement !== search && el.overlay.classList.contains('hidden')) {
         e.preventDefault();
-        search.focus();
+        toggleSearch(true);
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
         if (el.overlay.classList.contains('hidden')) {
@@ -1302,6 +1562,13 @@
         }
       }
     });
+  }
+
+  // 搜索栏：显示/隐藏（显示时自动聚焦）
+  function toggleSearch(forceShow) {
+    const show = forceShow === true ? true : el.searchbar.classList.contains('hidden');
+    el.searchbar.classList.toggle('hidden', !show);
+    if (show) setTimeout(() => $('search').focus(), 20);
   }
 
   /* ---------------------------------- 启动 ---------------------------------- */
@@ -1316,10 +1583,14 @@
     el.dialogBody = $('dialog-body');
     el.dialogFoot = $('dialog-foot');
     el.hint = $('hint');
+    el.sidebar = $('sidebar');
+    el.pageList = $('page-list');
+    el.searchbar = $('searchbar');
 
     const saved = await api.loadData();
     state = normalize(saved) || defaults();
     ui.activeCell = firstCellKey();
+    el.sidebar.classList.toggle('hidden', state.settings.sidebar === false);
 
     bindEvents();
     render();
