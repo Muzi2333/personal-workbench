@@ -873,20 +873,13 @@
     ]);
   }
 
-  async function openToolbarMenu(x, y) {
-    const auto = await api.getAutoLaunch();
-    const autoOn = !!(auto && auto.ok && auto.enabled);
+  function openToolbarMenu(x, y) {
     openMenu(x, y, [
       { label: '添加快捷方式', action: () => openItemDialog(ui.activeCell || firstCellKey(), null) },
       { label: '添加一行', action: () => insertRow(curPage().rows.length) },
       { label: '添加一列', action: () => insertCol(curPage().cols.length) },
       { label: '增加一页应用', action: () => addPage() },
       { sep: true },
-      { label: autoOn ? '开机自启动：已开启' : '开机自启动：已关闭', action: async () => {
-        const res = await api.setAutoLaunch(!autoOn);
-        if (res && res.ok) toast(res.enabled ? '已开启开机自启动' : '已关闭开机自启动', 'ok');
-        else toast((res && res.error) || '设置失败', 'err');
-      } },
       { label: state.settings.launch === 'double' ? '启动方式：双击 → 改为单击' : '启动方式：单击 → 改为双击', action: () => {
         state.settings.launch = state.settings.launch === 'double' ? 'single' : 'double';
         scheduleSave();

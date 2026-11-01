@@ -16,15 +16,35 @@ function showMainWindow() {
   win.focus();
 }
 
+// 登录项：写入与读取必须用同一组 path/args，否则命令行比对不一致，永远读回 false
+const loginItemOpts = () => ({ path: process.execPath, args: [app.getAppPath()] });
+
+function getAutoLaunch() {
+  try { return app.getLoginItemSettings(loginItemOpts()).openAtLogin; } catch (_) { return false; }
+}
+
+function setAutoLaunch(enabled) {
+  app.setLoginItemSettings(Object.assign({ openAtLogin: !!enabled }, loginItemOpts()));
+}
+
+function rebuildTrayMenu() {
+  if (!tray) return;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '显示主界面', click: showMainWindow },
+    { label: '开机自动启动', type: 'checkbox', checked: getAutoLaunch(), click: (item) => {
+      try { setAutoLaunch(item.checked); } catch (_) {}
+      rebuildTrayMenu(); // 以真实状态重建，失败时复选框自动回弹
+    } },
+    { type: 'separator' },
+    { label: '退出', click: () => { app.isQuitting = true; app.quit(); } },
+  ]));
+}
+
 function createTray() {
   const icon = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray.png'));
   tray = new Tray(icon);
   tray.setToolTip('工作台');
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: '显示主界面', click: showMainWindow },
-    { type: 'separator' },
-    { label: '退出', click: () => { app.isQuitting = true; app.quit(); } },
-  ]));
+  rebuildTrayMenu();
   tray.on('click', showMainWindow);
 }
 
@@ -32,8 +52,8 @@ function createWindow() {
   win = new BrowserWindow({
     width: 1400,
     height: 920,
-    minWidth: 980,
-    minHeight: 640,
+    minWidth: 800,
+    minHeight: 600,
     frame: false,
     show: false,
     backgroundColor: '#1a1b1c',
@@ -151,23 +171,14 @@ ipcMain.handle('app:open-data-dir', async () => {
 });
 
 /* -------------------------------- 开机自启动 -------------------------------- */
+// 开关在托盘右键菜单（checkbox）。保留 IPC 供冒烟测试与未来渲染层使用。
 
-ipcMain.handle('app:get-auto-launch', async () => {
-  try {
-    return { ok: true, enabled: app.getLoginItemSettings().openAtLogin };
-  } catch (err) {
-    return { ok: false, error: String(err && err.message ? err.message : err) };
-  }
-});
+ipcMain.handle('app:get-auto-launch', async () => ({ ok: true, enabled: getAutoLaunch() }));
 
 ipcMain.handle('app:set-auto-launch', async (_e, enabled) => {
   try {
-    // 开发态指向 electron.exe + 应用目录；打包后默认即自身 exe
-    app.setLoginItemSettings({
-      openAtLogin: !!enabled,
-      path: process.execPath,
-      args: [app.getAppPath()],
-    });
+    setAutoLaunch(enabled);
+    rebuildTrayMenu();
     return { ok: true, enabled: !!enabled };
   } catch (err) {
     return { ok: false, error: String(err && err.message ? err.message : err) };
