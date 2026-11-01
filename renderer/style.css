@@ -138,6 +138,7 @@ body {
 .page-item:hover { background: rgba(255, 255, 255, 0.05); color: var(--text); }
 .page-item.active { background: rgba(91, 157, 255, 0.16); color: #cfe1ff; }
 .page-item.is-dragging { opacity: 0.35; }
+.page-item.drop-hover { background: rgba(91, 157, 255, 0.28); color: #fff; outline: 1px solid var(--accent); }
 
 .page-name {
   display: block;

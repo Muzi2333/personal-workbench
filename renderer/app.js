@@ -324,13 +324,18 @@
     }
   }
 
-  function moveItem(fromKey, itemId, toKey, copy) {
-    const src = cellOf(fromKey, false);
+  function pageOf(id) {
+    return state.pages.find((p) => p.id === id) || curPage();
+  }
+
+  function moveItem(fromKey, itemId, toKey, copy, fromPageId) {
+    const srcPage = fromPageId ? pageOf(fromPageId) : curPage();
+    const src = Grid.getCell(srcPage, fromKey, false);
     if (!src || !src.items) return;
     const idx = src.items.findIndex((i) => i.id === itemId);
     if (idx < 0) return;
 
-    const dst = cellOf(toKey, true);
+    const dst = cellOf(toKey, true); // 目标格永远在当前页
     const item = src.items[idx];
 
     if (copy) {
@@ -338,7 +343,7 @@
     } else {
       src.items.splice(idx, 1);
       dst.items.push(item);
-      cleanupCell(fromKey);
+      if (!src.items.length) delete srcPage.cells[fromKey];
     }
 
     scheduleSave();
@@ -347,8 +352,9 @@
   }
 
   // 整格搬运：把 fromKey 格子的全部图标移到 toKey（合并成分组）
-  function moveCellContents(fromKey, toKey, copy) {
-    const src = cellOf(fromKey, false);
+  function moveCellContents(fromKey, toKey, copy, fromPageId) {
+    const srcPage = fromPageId ? pageOf(fromPageId) : curPage();
+    const src = Grid.getCell(srcPage, fromKey, false);
     if (!src || !src.items || !src.items.length) return;
     const dst = cellOf(toKey, true);
 
@@ -362,7 +368,7 @@
         if (src.name) dst.name = src.name;
         if (src.style) dst.style = src.style;
       }
-      delete curPage().cells[fromKey];
+      delete srcPage.cells[fromKey];
     }
 
     scheduleSave();
@@ -399,12 +405,29 @@
     document.querySelectorAll('.cell.drop-hover').forEach((c) => c.classList.remove('drop-hover'));
   }
 
+  // 跨页拖拽：拖拽物悬停到侧边栏页项上时切换到该页，随后可落在该页目标格
+  function dragHoverPage(x, y) {
+    const node = document.elementFromPoint(x, y);
+    const item = node && node.closest ? node.closest('.page-item') : null;
+    document.querySelectorAll('.page-item.drop-hover').forEach((n) => {
+      if (n !== item) n.classList.remove('drop-hover');
+    });
+    if (!item || !item.dataset.id) return;
+    item.classList.add('drop-hover');
+    if (item.dataset.id !== state.activePage) switchPage(item.dataset.id);
+  }
+
+  function clearPageHover() {
+    document.querySelectorAll('.page-item.drop-hover').forEach((n) => n.classList.remove('drop-hover'));
+  }
+
   function startIconDrag(ev, cellKey, itemId) {
     const cell = cellOf(cellKey, false);
     if (!cell) return;
     const item = (cell.items || []).find((i) => i.id === itemId);
     if (!item) return;
 
+    const srcPageId = curPage().id; // 源页：跨页拖拽时从这里搬走
     const node = ev.target.closest('.icon');
     const startX = ev.clientX;
     const startY = ev.clientY;
@@ -421,6 +444,7 @@
       const size = Number(ghost.dataset.size) || 54;
       ghost.style.transform = 'translate(' + (e.clientX - size / 2) + 'px,' + (e.clientY - size / 2) + 'px)';
       highlightCell(e.clientX, e.clientY, cellKey);
+      dragHoverPage(e.clientX, e.clientY);
     };
 
     const onUp = (e) => {
@@ -429,6 +453,7 @@
       if (ghost) ghost.remove();
       if (node) node.classList.remove('is-dragging');
       clearHighlight();
+      clearPageHover();
 
       if (!moved) {
         handleIconTap(item);
@@ -438,8 +463,8 @@
       const target = Grid.cellAt(e.clientX, e.clientY);
       if (!target) return;
       const toKey = target.dataset.key;
-      if (toKey === cellKey) return;
-      moveItem(cellKey, itemId, toKey, e.ctrlKey || e.metaKey);
+      if (toKey === cellKey && state.activePage === srcPageId) return;
+      moveItem(cellKey, itemId, toKey, e.ctrlKey || e.metaKey, srcPageId);
     };
 
     window.addEventListener('pointermove', onMove);
@@ -451,6 +476,7 @@
     const cell = cellOf(cellKey, false);
     if (!cell || !cell.items || !cell.items.length) return;
 
+    const srcPageId = curPage().id;
     const node = ev.target.closest('.folder');
     const startX = ev.clientX;
     const startY = ev.clientY;
@@ -467,6 +493,7 @@
       const size = Number(ghost.dataset.size) || 54;
       ghost.style.transform = 'translate(' + (e.clientX - size / 2) + 'px,' + (e.clientY - size / 2) + 'px)';
       highlightCell(e.clientX, e.clientY, cellKey);
+      dragHoverPage(e.clientX, e.clientY);
     };
 
     const onUp = (e) => {
@@ -475,6 +502,7 @@
       if (ghost) ghost.remove();
       if (node) node.classList.remove('is-dragging');
       clearHighlight();
+      clearPageHover();
 
       if (!moved) {
         openFolder(cellKey);
@@ -484,8 +512,8 @@
       const target = Grid.cellAt(e.clientX, e.clientY);
       if (!target) return;
       const toKey = target.dataset.key;
-      if (toKey === cellKey) return;
-      moveCellContents(cellKey, toKey, e.ctrlKey || e.metaKey);
+      if (toKey === cellKey && state.activePage === srcPageId) return;
+      moveCellContents(cellKey, toKey, e.ctrlKey || e.metaKey, srcPageId);
     };
 
     window.addEventListener('pointermove', onMove);
