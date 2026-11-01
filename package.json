@@ -1,0 +1,14 @@
+{
+  "name": "workbench",
+  "productName": "工作台",
+  "version": "0.1.0",
+  "private": true,
+  "description": "个人工作台 - 图标宫格快捷启动",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

@@ -1,0 +1,29 @@
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
+
+contextBridge.exposeInMainWorld('workbench', {
+  loadData: () => ipcRenderer.invoke('data:load'),
+  saveData: (data) => ipcRenderer.invoke('data:save', data),
+  exportData: (data) => ipcRenderer.invoke('data:export', data),
+  importData: () => ipcRenderer.invoke('data:import'),
+  openDataDir: () => ipcRenderer.invoke('app:open-data-dir'),
+
+  launch: (payload) => ipcRenderer.invoke('target:launch', payload),
+  icon: (filePath) => ipcRenderer.invoke('target:icon', filePath),
+  pick: (options) => ipcRenderer.invoke('target:pick', options),
+  reveal: (filePath) => ipcRenderer.invoke('target:reveal', filePath),
+
+  pathForFile: (file) => {
+    try {
+      if (webUtils && webUtils.getPathForFile) return webUtils.getPathForFile(file);
+    } catch (_) {}
+    return (file && file.path) || '';
+  },
+
+  win: {
+    minimize: () => ipcRenderer.send('window:minimize'),
+    toggleMax: () => ipcRenderer.send('window:toggle-max'),
+    close: () => ipcRenderer.send('window:close'),
+  },
+
+  onWindowState: (cb) => ipcRenderer.on('window:state', (_e, s) => cb(s)),
+});

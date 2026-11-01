@@ -1,0 +1,224 @@
+/* 宫格布局引擎：只负责把 state 渲染成 DOM，交互由 app.js 统一处理 */
+(function () {
+  const EMPTY_PX =
+    'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+  function newId(prefix) {
+    return prefix + '_' + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-3);
+  }
+
+  function cellKey(rowId, colId) {
+    return rowId + '|' + colId;
+  }
+
+  function getCell(state, key, create) {
+    if (!state.cells[key] && create) state.cells[key] = { items: [] };
+    return state.cells[key];
+  }
+
+  function iconInfo(item, state) {
+    const icon = item.icon || {};
+    if (icon.type === 'emoji' && icon.value) return { kind: 'emoji', value: icon.value };
+    if (icon.type === 'image' && icon.value) return { kind: 'image', value: icon.value };
+    const src = item.target ? state.iconCache && state.iconCache[item.target] : null;
+    return { kind: 'auto', src: src || null, target: item.target || '' };
+  }
+
+  function tile(item, state) {
+    const t = document.createElement('div');
+    t.className = 'tile';
+    const info = iconInfo(item, state);
+
+    if (info.kind === 'emoji') {
+      const sp = document.createElement('span');
+      sp.className = 'emoji';
+      sp.textContent = info.value;
+      t.appendChild(sp);
+    } else {
+      const img = document.createElement('img');
+      img.alt = '';
+      img.draggable = false;
+      img.src = info.value || info.src || EMPTY_PX;
+      if (info.target) img.dataset.iconTarget = info.target;
+      if (!info.src && info.kind === 'auto') img.classList.add('is-placeholder');
+      img.addEventListener('error', () => img.classList.add('is-placeholder'));
+      t.appendChild(img);
+    }
+
+    if (item.tint) t.style.background = item.tint;
+    return t;
+  }
+
+  function iconEl(item, state) {
+    const el = document.createElement('div');
+    el.className = 'icon';
+    el.dataset.item = item.id;
+    el.appendChild(tile(item, state));
+
+    if (state.settings.showLabels !== false) {
+      const lb = document.createElement('span');
+      lb.className = 'icon-label';
+      lb.textContent = item.name || '';
+      el.appendChild(lb);
+    }
+    return el;
+  }
+
+  function folderEl(cell, state) {
+    const box = document.createElement('div');
+    box.className = 'folder';
+
+    const stack = document.createElement('div');
+    stack.className = 'folder-stack';
+    const preview = cell.items.slice(0, 4);
+    preview.forEach((it) => {
+      const mini = document.createElement('div');
+      mini.className = 'mini';
+      mini.appendChild(tile(it, state));
+      stack.appendChild(mini);
+    });
+    if (cell.items.length < 4) {
+      for (let i = cell.items.length; i < 4; i++) {
+        const blank = document.createElement('div');
+        blank.className = 'mini blank';
+        stack.appendChild(blank);
+      }
+    }
+
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = String(cell.items.length);
+
+    box.appendChild(stack);
+    box.appendChild(badge);
+
+    const lb = document.createElement('span');
+    lb.className = 'folder-label';
+    lb.textContent = cell.name || cell.items.length + ' 个应用';
+    box.appendChild(lb);
+    return box;
+  }
+
+  function render(container, state) {
+    const cols = state.cols || [];
+    const rows = state.rows || [];
+    const gap = (state.layout && state.layout.gap) || 10;
+
+    container.innerHTML = '';
+    container.style.setProperty('--gap', gap + 'px');
+    container.style.setProperty('--icon-size', (state.settings.iconSize || 54) + 'px');
+
+    if (!cols.length || !rows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'grid-empty';
+      empty.textContent = '至少需要一行一列，点右上角「添加行 / 添加列」开始吧';
+      container.style.display = 'block';
+      container.appendChild(empty);
+      return;
+    }
+    container.style.display = 'grid';
+
+    const colTpl = cols.map((c) => Math.max(110, c.width || 240) + 'px').join(' ');
+    const rowTpl = rows.map((r) => Math.max(96, r.height || 150) + 'px').join(' ');
+    container.style.gridTemplateColumns = `var(--head-w) ${colTpl}`;
+    container.style.gridTemplateRows = `var(--head-h) ${rowTpl}`;
+
+    // 左上角
+    const corner = document.createElement('div');
+    corner.className = 'corner';
+    corner.style.gridColumn = '1';
+    corner.style.gridRow = '1';
+    container.appendChild(corner);
+
+    // 列头
+    cols.forEach((col, i) => {
+      const h = document.createElement('div');
+      h.className = 'col-head';
+      h.dataset.axis = 'col';
+      h.dataset.id = col.id;
+      h.style.gridColumn = String(i + 2);
+      h.style.gridRow = '1';
+
+      const grip = document.createElement('span');
+      grip.className = 'grip';
+      grip.dataset.grip = 'col';
+      grip.title = '拖动调整列顺序';
+
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      dot.style.background = col.color || '#5b6b7c';
+
+      const name = document.createElement('span');
+      name.className = 'hname';
+      name.textContent = col.name || '未命名';
+
+      h.append(grip, dot, name);
+      container.appendChild(h);
+    });
+
+    // 行头 + 单元格
+    rows.forEach((row, j) => {
+      const rh = document.createElement('div');
+      rh.className = 'row-head';
+      rh.dataset.axis = 'row';
+      rh.dataset.id = row.id;
+      rh.style.gridColumn = '1';
+      rh.style.gridRow = String(j + 2);
+
+      const grip = document.createElement('span');
+      grip.className = 'grip';
+      grip.dataset.grip = 'row';
+      grip.title = '拖动调整行顺序';
+
+      const dot = document.createElement('span');
+      dot.className = 'dot';
+      dot.style.background = row.color || '#5b6b7c';
+
+      const name = document.createElement('span');
+      name.className = 'hname';
+      name.textContent = row.name || '未命名';
+
+      rh.append(grip, dot, name);
+      container.appendChild(rh);
+
+      cols.forEach((col, i) => {
+        const key = cellKey(row.id, col.id);
+        const cell = getCell(state, key, false) || { items: [] };
+        const c = document.createElement('div');
+        c.className = 'cell';
+        c.dataset.key = key;
+        c.dataset.row = row.id;
+        c.dataset.col = col.id;
+        c.style.gridColumn = String(i + 2);
+        c.style.gridRow = String(j + 2);
+
+        const st = cell.style || {};
+        if (st.bg) c.style.background = st.bg;
+        if (st.border) c.style.borderColor = st.border;
+        if (st.radius != null && st.radius !== '') c.style.borderRadius = Number(st.radius) + 'px';
+
+        const items = cell.items || [];
+        if (!items.length) {
+          c.classList.add('is-empty');
+          const mark = document.createElement('div');
+          mark.className = 'empty-mark';
+          mark.textContent = cell.name || '+';
+          c.appendChild(mark);
+        } else if (items.length === 1) {
+          c.appendChild(iconEl(items[0], state));
+        } else {
+          c.appendChild(folderEl(cell, state));
+        }
+
+        container.appendChild(c);
+      });
+    });
+  }
+
+  function cellAt(x, y) {
+    const el = document.elementFromPoint(x, y);
+    return el ? el.closest('.cell') : null;
+  }
+
+  window.Grid = { newId, cellKey, getCell, render, cellAt, iconInfo };
+})();
