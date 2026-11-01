@@ -417,6 +417,58 @@ ipcMain.handle('icon:fetch-favicon', async (_e, url) => {
   }
 });
 
+// 从页面 HTML 解析 <link rel="icon"> / apple-touch-icon 再下载。
+// 兜底场景：站点没有 /favicon.ico，且 Google / DuckDuckGo 图标服务不可达（被墙），
+// 但页面自己声明了图标地址（绝对或相对路径均可）。
+ipcMain.handle('icon:favicon-from-page', async (_e, pageUrl) => {
+  const target = String(pageUrl || '').trim();
+  if (!/^https?:/i.test(target)) return { ok: false };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await net.fetch(target, { signal: controller.signal, redirect: 'follow' });
+    if (!res || !res.ok) return { ok: false };
+    const html = await res.text();
+    if (!html || html.length > 1024 * 1024) return { ok: false };
+
+    // 收集声明的图标地址：apple-touch-icon 一般尺寸更大，优先尝试
+    const plain = [];
+    const touch = [];
+    for (const tag of html.match(/<link\b[^>]*>/gi) || []) {
+      const rel = (tag.match(/rel\s*=\s*["']([^"']*)["']/i) || [])[1] || '';
+      if (!/icon/i.test(rel)) continue;
+      const href = (tag.match(/href\s*=\s*["']([^"']+)["']/i) || [])[1];
+      if (!href) continue;
+      (/apple-touch/i.test(rel) ? touch : plain).push(href);
+    }
+    const hrefs = touch.concat(plain).slice(0, 5);
+    if (!hrefs.length) return { ok: false };
+
+    for (const href of hrefs) {
+      let abs;
+      try { abs = new URL(href, res.url || target).href; } catch (_) { continue; }
+      if (!/^https?:/i.test(abs)) continue;
+      try {
+        const c2 = new AbortController();
+        const t2 = setTimeout(() => c2.abort(), 6000);
+        const r2 = await net.fetch(abs, { signal: c2.signal, redirect: 'follow' });
+        clearTimeout(t2);
+        if (!r2 || !r2.ok) continue;
+        const buf = Buffer.from(await r2.arrayBuffer());
+        if (buf.length < 32 || buf.length > 512 * 1024) continue;
+        const mime = imageMimeOf(buf, r2.headers.get('content-type'));
+        if (!mime || /html/.test(mime)) continue;
+        return { ok: true, dataUrl: 'data:' + mime + ';base64,' + buf.toString('base64') };
+      } catch (_) {}
+    }
+    return { ok: false };
+  } catch (_) {
+    return { ok: false };
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
 ipcMain.handle('app:version', async () => app.getVersion());
 
 /* --------------------------------- 窗口控制 -------------------------------- */

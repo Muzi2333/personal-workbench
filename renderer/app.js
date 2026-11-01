@@ -607,10 +607,10 @@
     const candidates = faviconCandidates(u.origin, host);
 
     if (isElectron) {
-      // 并行尝试几个源，谁先下载成功就用谁
+      // 并行尝试几个源，谁先下载成功就用谁；页面解析兜底（站点无 favicon.ico 且公共服务被墙时仍可取到）
       return new Promise((resolve) => {
         let done = false;
-        let pending = candidates.length;
+        let pending = candidates.length + 1;
         const finish = (d) => { if (done) return; done = true; resolve(d || null); };
         candidates.forEach((src) => {
           Promise.resolve(api.fetchFavicon(src)).then((res) => {
@@ -618,6 +618,10 @@
             if (--pending === 0) finish(null);
           }).catch(() => { if (--pending === 0) finish(null); });
         });
+        Promise.resolve(api.faviconFromPage(url)).then((res) => {
+          if (res && res.ok && res.dataUrl) return finish(res.dataUrl);
+          if (--pending === 0) finish(null);
+        }).catch(() => { if (--pending === 0) finish(null); });
         setTimeout(() => finish(null), 9000);
       });
     }

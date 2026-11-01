@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('workbench', {
   launch: (payload) => ipcRenderer.invoke('target:launch', payload),
   icon: (filePath) => ipcRenderer.invoke('target:icon', filePath),
   fetchFavicon: (url) => ipcRenderer.invoke('icon:fetch-favicon', url),
+  faviconFromPage: (url) => ipcRenderer.invoke('icon:favicon-from-page', url),
   appVersion: () => ipcRenderer.invoke('app:version'),
   pick: (options) => ipcRenderer.invoke('target:pick', options),
   reveal: (filePath) => ipcRenderer.invoke('target:reveal', filePath),
