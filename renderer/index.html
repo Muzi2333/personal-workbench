@@ -12,11 +12,14 @@
       <button class="tb-btn slim" id="btn-sidebar" title="显示 / 隐藏侧边栏">
         <svg viewBox="0 0 16 16" width="15" height="15"><rect x="1.8" y="2.4" width="12.4" height="11.2" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M6.6 2.4v11.2" stroke="currentColor" stroke-width="1.2"/></svg>
       </button>
-    </div>
-    <div class="tb-right">
       <button class="tb-btn slim" id="btn-search" title="搜索（/）">
         <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.6 10.6l3.2 3.2" stroke="currentColor" stroke-width="1.3"/></svg>
       </button>
+      <div class="search tb-search hidden" id="tb-search">
+        <svg viewBox="0 0 16 16" width="14" height="14" class="search-ico"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.6 10.6l3.2 3.2" stroke="currentColor" stroke-width="1.3"/></svg>
+        <input id="search" type="text" placeholder="搜索快捷方式…" autocomplete="off" spellcheck="false" />
+        <span class="kbd">esc</span>
+      </div>
       <div class="size-box" title="图标大小">
         <span>图标</span>
         <input id="icon-size" type="range" min="36" max="76" step="2" />
@@ -24,7 +27,8 @@
       <button class="tb-btn slim" id="btn-menu" title="设置">
         <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 1.9v2.1M8 12v2.1M1.9 8h2.1M12 8h2.1M3.7 3.7l1.5 1.5M10.8 10.8l1.5 1.5M12.3 3.7l-1.5 1.5M5.2 10.8l-1.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
       </button>
-      <span class="tb-sep"></span>
+    </div>
+    <div class="tb-right">
       <button class="tb-btn" id="btn-min" title="最小化">
         <svg viewBox="0 0 12 12" width="12" height="12"><path d="M1 6h10" stroke="currentColor" stroke-width="1.1"/></svg>
       </button>
@@ -37,18 +41,9 @@
     </div>
   </div>
 
-  <div class="searchbar hidden" id="searchbar">
-    <div class="search">
-      <svg viewBox="0 0 16 16" width="15" height="15" class="search-ico"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.6 10.6l3.2 3.2" stroke="currentColor" stroke-width="1.3"/></svg>
-      <input id="search" type="text" placeholder="搜索快捷方式…" autocomplete="off" spellcheck="false" />
-      <span class="kbd">esc</span>
-    </div>
-  </div>
-
   <div class="body-row">
     <aside class="sidebar" id="sidebar">
       <div class="page-list" id="page-list"></div>
-      <button class="page-add" id="page-add" title="增加一页应用">＋</button>
     </aside>
     <main class="canvas" id="canvas">
       <div class="grid" id="grid"></div>

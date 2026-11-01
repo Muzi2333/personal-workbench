@@ -179,6 +179,11 @@
 
     data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true }, data.settings || {});
     data.iconCache = data.iconCache || {};
+    // 图标缓存版本：.lnk 图标提取修复后，清掉旧版缓存的快捷方式通用图标，强制重新提取
+    if (data.cacheVer !== 2) {
+      Object.keys(data.iconCache).forEach((k) => { if (/\.lnk$/i.test(k)) delete data.iconCache[k]; });
+      data.cacheVer = 2;
+    }
     return data;
   }
 
@@ -800,7 +805,7 @@
     const cell = cellOf(key, false) || { items: [] };
     const count = (cell.items || []).length;
     openMenu(x, y, [
-      { label: '添加图标', sub: '＋', action: () => openItemDialog(key, null) },
+      { label: '添加快捷方式', sub: '＋', action: () => openItemDialog(key, null) },
       { label: '编辑格子样式', action: () => openCellDialog(key) },
       count ? { label: '清空这个格子', danger: true, action: () => { delete page.cells[key]; scheduleSave(); render(); } } : { sep: true },
       { label: '插入一行（下方）', action: () => {
@@ -868,7 +873,7 @@
 
   function openToolbarMenu(x, y) {
     openMenu(x, y, [
-      { label: '添加图标', action: () => openItemDialog(ui.activeCell || firstCellKey(), null) },
+      { label: '添加快捷方式', action: () => openItemDialog(ui.activeCell || firstCellKey(), null) },
       { label: '添加一行', action: () => insertRow(curPage().rows.length) },
       { label: '添加一列', action: () => insertCol(curPage().cols.length) },
       { label: '增加一页应用', action: () => addPage() },
@@ -984,7 +989,7 @@
       : null;
 
     const body = openDialog({
-      title: editing ? '编辑图标' : '添加图标',
+      title: editing ? '编辑快捷方式' : '添加快捷方式',
       body: [
         '<div class="field"><label>名称</label>',
         '<input class="input" id="f-name" placeholder="显示在图标下方" spellcheck="false"></div>',
@@ -1070,6 +1075,7 @@
         customIcon = /\.(png|jpe?g|bmp|webp|gif)$/i.test(res.path)
           ? { type: 'image', value: res.path }
           : { type: 'file', value: res.path };
+        fEmoji.value = ''; // 选了自定义图标就清掉 emoji，否则保存时 emoji 优先
         refreshIconHint();
       } else if (res && res.error && !res.canceled) {
         toast(res.error, 'err');
@@ -1104,7 +1110,7 @@
       scheduleSave();
       render();
       requestIcons();
-      toast(editing ? '已保存' : '已添加图标', 'ok');
+      toast(editing ? '已保存' : '已添加快捷方式', 'ok');
       return true;
     }
   }
@@ -1158,7 +1164,8 @@
   }
 
   function openHeaderDialog(axis, id) {
-    const list = axis === 'row' ? state.rows : state.cols;
+    const page = curPage();
+    const list = axis === 'row' ? page.rows : page.cols;
     const target = list.find((v) => v.id === id);
     if (!target) return;
     const isRow = axis === 'row';
@@ -1347,7 +1354,7 @@
       title: cell.name || cell.items.length + ' 个应用',
       body: '<div class="hintline">单击启动，右键可编辑或删除。</div>',
       buttons: [
-        { label: '添加图标', ghost: true, onClick: () => { closeDialog(); openItemDialog(key, null); } },
+        { label: '添加快捷方式', ghost: true, onClick: () => { closeDialog(); openItemDialog(key, null); } },
         { label: '关闭', primary: true },
       ],
     });
@@ -1400,19 +1407,43 @@
       openToolbarMenu(rect.right - 190, rect.bottom + 6);
     });
 
-    // 侧边栏显隐
-    $('btn-sidebar').addEventListener('click', () => {
+    // 侧边栏：点击持久显隐；隐藏状态下悬停按钮可临时弹出使用
+    const btnSidebar = $('btn-sidebar');
+    btnSidebar.addEventListener('click', () => {
       const show = state.settings.sidebar === false;
       state.settings.sidebar = show;
       el.sidebar.classList.toggle('hidden', !show);
+      ui.tempSidebar = false;
+      ui.noTempUntilLeave = !show; // 刚主动隐藏，需移开鼠标再悬停才临时弹出
       scheduleSave();
     });
+    btnSidebar.addEventListener('mouseenter', () => {
+      if (state.settings.sidebar !== false || ui.noTempUntilLeave) return;
+      clearTimeout(ui.tempTimer);
+      if (el.sidebar.classList.contains('hidden')) {
+        el.sidebar.classList.remove('hidden');
+        ui.tempSidebar = true;
+      }
+    });
+    btnSidebar.addEventListener('mouseleave', () => {
+      ui.noTempUntilLeave = false;
+      scheduleTempHide();
+    });
+    el.sidebar.addEventListener('mouseenter', () => clearTimeout(ui.tempTimer));
+    el.sidebar.addEventListener('mouseleave', scheduleTempHide);
 
-    // 搜索栏显隐
+    // 侧边栏空白处右键：增加一页应用（页项自己的右键菜单优先）
+    el.sidebar.addEventListener('contextmenu', (e) => {
+      if (e.target.closest('.page-item')) return;
+      e.preventDefault();
+      openMenu(e.clientX, e.clientY, [
+        { label: '增加一页应用', action: () => addPage() },
+      ]);
+    });
+
+    // 搜索按钮：点击展开为搜索框 / 再点收起
     $('btn-search').addEventListener('click', () => toggleSearch());
-
-    // 增加一页
-    $('page-add').addEventListener('click', () => addPage());
+    search.addEventListener('blur', () => { if (!search.value) toggleSearch(false); });
 
     // 宫格事件（委托，重渲染后依然有效）
     el.grid.addEventListener('pointerdown', (e) => {
@@ -1525,7 +1556,7 @@
       scheduleSave();
       render();
       requestIcons();
-      toast('已添加 ' + paths.length + ' 个图标', 'ok');
+      toast('已添加 ' + paths.length + ' 个快捷方式', 'ok');
     });
 
     // 全局关闭菜单 / 弹窗
@@ -1542,12 +1573,9 @@
       if (e.key === 'Escape') {
         closeMenu();
         if (!el.overlay.classList.contains('hidden')) closeDialog();
-        // 搜索框内 Esc：清空并收起搜索栏
+        // 搜索框内 Esc：清空并收起为按钮
         if (document.activeElement === search) {
-          search.value = '';
-          ui.q = '';
-          applyFilter();
-          el.searchbar.classList.add('hidden');
+          toggleSearch(false);
           search.blur();
         }
       }
@@ -1564,11 +1592,31 @@
     });
   }
 
-  // 搜索栏：显示/隐藏（显示时自动聚焦）
-  function toggleSearch(forceShow) {
-    const show = forceShow === true ? true : el.searchbar.classList.contains('hidden');
-    el.searchbar.classList.toggle('hidden', !show);
-    if (show) setTimeout(() => $('search').focus(), 20);
+  // 侧边栏临时显示的延迟收回
+  function scheduleTempHide() {
+    if (!ui.tempSidebar) return;
+    clearTimeout(ui.tempTimer);
+    ui.tempTimer = setTimeout(() => {
+      if (ui.tempSidebar && !el.sidebar.matches(':hover') && !$('btn-sidebar').matches(':hover')) {
+        el.sidebar.classList.add('hidden');
+        ui.tempSidebar = false;
+      }
+    }, 300);
+  }
+
+  // 标题栏搜索：搜索按钮展开成输入框，收起时清空过滤
+  function toggleSearch(force) {
+    const show = force === true ? true : force === false ? false : el.tbSearch.classList.contains('hidden');
+    el.tbSearch.classList.toggle('hidden', !show);
+    $('btn-search').classList.toggle('hidden', show);
+    const search = $('search');
+    if (show) {
+      setTimeout(() => search.focus(), 20);
+    } else if (search.value) {
+      search.value = '';
+      ui.q = '';
+      applyFilter();
+    }
   }
 
   /* ---------------------------------- 启动 ---------------------------------- */
@@ -1585,7 +1633,7 @@
     el.hint = $('hint');
     el.sidebar = $('sidebar');
     el.pageList = $('page-list');
-    el.searchbar = $('searchbar');
+    el.tbSearch = $('tb-search');
 
     const saved = await api.loadData();
     state = normalize(saved) || defaults();
