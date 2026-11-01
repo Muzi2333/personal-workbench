@@ -50,7 +50,15 @@
 
 ### 方式一：安装包
 
-下载最新 `工作台 Setup x.x.x.exe`，双击安装（可选安装目录，自动创建桌面快捷方式）。
+打开仓库右侧的 **Releases** 页面（[最新版本](https://github.com/Muzi2333/personal-workbench/releases/latest)），下载 `工作台 Setup x.x.x.exe`，双击安装（可选安装目录，自动创建桌面快捷方式）。
+
+> 安装包不放在源码目录（`dist/` 已在 `.gitignore` 中忽略），统一通过 Releases 分发。
+
+### 本地打包
+
+```bash
+npm run dist   # 产物：dist\工作台 Setup x.x.x.exe
+```
 
 ### 方式二：开发运行
 
@@ -65,6 +73,24 @@ npm start
 ```
 
 > 需要 Node.js ≥ 18（开发用），打包需 Windows 环境。
+
+---
+
+## 📦 发布新版本（自动）
+
+推送 `v*` 标签后，GitHub Actions（[release.yml](.github/workflows/release.yml)）会自动在 `windows-latest` 上打包并把 `Setup.exe` 上传到 Releases，无需本地打包。
+
+```bash
+# 1. 修改 package.json 的 version，例如 0.2.0
+# 2. 提交并推送代码
+git add . && git commit -m "release: v0.2.0" && git push
+
+# 3. 打标签并推送（标签必须与版本号一致：v0.2.0）
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+工作流会先校验标签与 `package.json` 版本号是否一致，不一致会直接失败，避免发布错版本。也可以在仓库 **Actions** 页面手动触发（workflow_dispatch）。
 
 ---
 
@@ -99,11 +125,14 @@ personal-workbench/
 │  ├─ app.js             状态管理 + 全部交互（含全局搜索）
 │  └─ vendor/
 │     └─ pinyin-pro.js   pinyin-pro 本地 UMD 包（离线拼音匹配）
-└─ tools/
-   ├─ preview-server.js  浏览器预览静态服务器
-   ├─ gen-app-icon.js    生成 icon.png / icon.ico（纯 Node 绘图）
-   ├─ gen-tray-icon.js   生成 tray.png
-   └─ test-main.js       主进程 IPC 冒烟测试
+├─ tools/
+│  ├─ preview-server.js  浏览器预览静态服务器
+│  ├─ gen-app-icon.js    生成 icon.png / icon.ico（纯 Node 绘图）
+│  ├─ gen-tray-icon.js   生成 tray.png
+│  └─ test-main.js       主进程 IPC 冒烟测试
+└─ .github/
+   └─ workflows/
+      └─ release.yml     推 v* 标签自动打包并发布到 Releases
 ```
 
 ---
