@@ -50,6 +50,10 @@
     return /^#[0-9a-f]{3,8}$/i.test(s) ? s : '';
   }
 
+  // 新增行列/页时随机一个标记色（取色板，避免过浅/过暗）
+  const COLOR_PALETTE = ['#5b9dff', '#a78bfa', '#4fc08d', '#e3b341', '#f7786b', '#5ec8e0', '#ec7db8', '#7c8aff', '#5ad1a0', '#f59e0b'];
+  function randomColor() { return COLOR_PALETTE[Math.floor(Math.random() * COLOR_PALETTE.length)]; }
+
   /* ---------------------------------- 状态 ---------------------------------- */
 
   let state = null;
@@ -68,6 +72,38 @@
   function scheduleSave() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => { api.saveData(state); }, 260);
+  }
+
+  /* ---------- 撤销历史（Ctrl+Z） ---------- */
+  const history = [];
+
+  // 快照：排除 iconCache（图标是派生数据，不参与撤销，体积也大）
+  function snapshot() {
+    const { iconCache, ...rest } = state;
+    return JSON.parse(JSON.stringify(rest));
+  }
+
+  // 在每次会修改 state 的动作开始前调用；连续手势里已记过则跳过
+  function pushHistory() {
+    const limit = Math.max(0, Number(state.settings && state.settings.undoLimit) || 100);
+    if (limit <= 0) return;
+    try {
+      history.push(snapshot());
+      while (history.length > limit) history.shift();
+    } catch (_) {}
+  }
+
+  function undo() {
+    if (!history.length) { toast('没有可撤销的操作', 'err'); return; }
+    const snap = history.pop();
+    const iconCache = state.iconCache;
+    Object.assign(state, snap);
+    state.iconCache = iconCache;
+    ui.activeCell = firstCellKey();
+    scheduleSave();
+    render();
+    requestIcons();
+    toast('已撤销', 'ok');
   }
 
   function defaults() {
@@ -117,7 +153,7 @@
       version: 3,
       pages: [{ id: 'p1', name: '主页', rows, cols, cells, layout: { gap: 10 } }],
       activePage: 'p1',
-      settings: { iconSize: 54, showLabels: true, launch: 'double', sidebar: true },
+      settings: { iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100 },
       iconCache: {},
     };
   }
@@ -179,7 +215,7 @@
 
     if (!data.pages.some((p) => p.id === data.activePage)) data.activePage = data.pages[0].id;
 
-    data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true }, data.settings || {});
+    data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100 }, data.settings || {});
     data.iconCache = data.iconCache || {};
     // 图标缓存版本：图标升级为 256px 高清提取，清掉全部旧缓存强制重取
     if (data.cacheVer !== 3) {
@@ -267,26 +303,63 @@
     });
   }
 
+  // 网址快捷方式：异步抓取网站 favicon（多个源兜底，第一个加载成功就用）
+  function fetchFavicon(url) {
+    let host = '';
+    try { host = new URL(url).hostname; } catch (_) { return Promise.resolve(null); }
+    if (!host) return Promise.resolve(null);
+    const candidates = [
+      'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(host) + '&sz=64',
+      'https://icons.duckduckgo.com/ip3/' + encodeURIComponent(host) + '.ico',
+      'https://' + host + '/favicon.ico',
+    ];
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (src) => { if (done) return; done = true; resolve(src); };
+      candidates.forEach((src) => {
+        const img = new Image();
+        img.onload = () => finish(src);
+        img.onerror = () => {};
+        img.src = src;
+      });
+      setTimeout(() => finish(null), 6000);
+    });
+  }
+
   async function requestIcons() {
     const targets = new Set();
     const pageCells = curPage().cells;
+    const urlTargets = [];
     Object.keys(pageCells).forEach((key) => {
       (pageCells[key].items || []).forEach((it) => {
         const type = it.icon && it.icon.type ? it.icon.type : 'auto';
-        if (type === 'auto' && it.target && !state.iconCache[it.target]) targets.add(it.target);
-        if (type === 'file' && it.icon.value && !state.iconCache[it.icon.value]) targets.add(it.icon.value);
+        if (type === 'file') {
+          if (it.icon.value && !state.iconCache[it.icon.value]) targets.add(it.icon.value);
+          return;
+        }
+        if (type !== 'auto' || !it.target) return;
+        if (state.iconCache[it.target]) return;
+        if (/^https?:/i.test(it.target)) urlTargets.push(it.target);
+        else targets.add(it.target);
       });
     });
-    if (!targets.size) return;
 
-    let changed = false;
+    // 网址：并行抓 favicon
+    const urlJobs = urlTargets.map(async (t) => {
+      const src = await fetchFavicon(t);
+      if (src) { state.iconCache[t] = src; return true; }
+      return false;
+    });
+    const urlResults = await Promise.all(urlJobs);
+
+    // 本地程序：主进程提取高清图标
+    let localChanged = false;
     for (const t of targets) {
       const src = await api.icon(t);
-      if (src) {
-        state.iconCache[t] = src;
-        changed = true;
-      }
+      if (src) { state.iconCache[t] = src; localChanged = true; }
     }
+
+    const changed = localChanged || urlResults.some(Boolean);
     if (!changed) return;
 
     document.querySelectorAll('img[data-icon-target]').forEach((img) => {
@@ -334,6 +407,7 @@
     if (!src || !src.items) return;
     const idx = src.items.findIndex((i) => i.id === itemId);
     if (idx < 0) return;
+    pushHistory();
 
     const dst = cellOf(toKey, true); // 目标格永远在当前页
     const item = src.items[idx];
@@ -362,6 +436,7 @@
     }
     const idx = (src.items || []).findIndex((i) => i.id === itemId);
     if (idx < 0) return;
+    pushHistory();
     const moved = src.items[idx];
     const other = dst.items[0];
     src.items.splice(idx, 1, other);
@@ -376,6 +451,7 @@
     const srcPage = fromPageId ? pageOf(fromPageId) : curPage();
     const src = Grid.getCell(srcPage, fromKey, false);
     if (!src || !src.items || !src.items.length) return;
+    pushHistory();
     const dst = cellOf(toKey, true);
 
     if (copy) {
@@ -652,6 +728,7 @@
       headEl.classList.remove('is-dragging');
 
       if (to !== from && to !== from + 1) {
+        pushHistory();
         const target = to > from ? to - 1 : to;
         const moved = list.splice(from, 1)[0];
         list.splice(target, 0, moved);
@@ -669,26 +746,28 @@
   /* --------------------------------- 行列编辑 -------------------------------- */
 
   function insertRow(atIndex) {
+    pushHistory();
     const page = curPage();
     const idx = Math.max(0, Math.min(atIndex, page.rows.length));
     page.rows.splice(idx, 0, {
       id: Grid.newId('r'),
       name: '行 ' + (idx + 1),
-      color: '#5b6b7c',
-      height: 150,
+      color: randomColor(),
+      height: 80,
     });
     scheduleSave();
     render();
   }
 
   function insertCol(atIndex) {
+    pushHistory();
     const page = curPage();
     const idx = Math.max(0, Math.min(atIndex, page.cols.length));
     page.cols.splice(idx, 0, {
       id: Grid.newId('c'),
       name: '列 ' + (idx + 1),
-      color: '#5b6b7c',
-      width: 150,
+      color: randomColor(),
+      width: 80,
     });
     scheduleSave();
     render();
@@ -698,6 +777,7 @@
     const page = curPage();
     const idx = page.rows.findIndex((r) => r.id === id);
     if (idx < 0) return false;
+    pushHistory();
     page.rows.splice(idx, 1);
     Object.keys(page.cells).forEach((k) => { if (k.startsWith(id + '|')) delete page.cells[k]; });
     scheduleSave();
@@ -709,6 +789,7 @@
     const page = curPage();
     const idx = page.cols.findIndex((c) => c.id === id);
     if (idx < 0) return false;
+    pushHistory();
     page.cols.splice(idx, 1);
     Object.keys(page.cells).forEach((k) => { if (k.endsWith('|' + id)) delete page.cells[k]; });
     scheduleSave();
@@ -752,12 +833,13 @@
   }
 
   function addPage(atIndex) {
+    pushHistory();
     const idx = atIndex == null ? state.pages.length : Math.max(0, Math.min(atIndex, state.pages.length));
     const mkAxis = (prefix, name, size) => [1, 2, 3].map((n) => ({
       id: Grid.newId(prefix),
       name: name + ' ' + n,
-      color: '#5b6b7c',
-      [size]: 150,
+      color: randomColor(),
+      [size]: 80,
     }));
     const page = {
       id: Grid.newId('p'),
@@ -776,6 +858,7 @@
     if (state.pages.length <= 1) { toast('至少保留一页', 'err'); return; }
     const idx = state.pages.findIndex((p) => p.id === id);
     if (idx < 0) return;
+    pushHistory();
     state.pages.splice(idx, 1);
     if (state.activePage === id) state.activePage = state.pages[Math.max(0, idx - 1)].id;
     ui.activeCell = firstCellKey();
@@ -794,6 +877,7 @@
       buttons: [
         { label: '取消', ghost: true },
         { label: '保存', primary: true, onClick: () => {
+          pushHistory();
           page.name = trim(body.querySelector('#pg-name').value) || page.name;
           scheduleSave();
           renderSidebar();
@@ -860,6 +944,7 @@
       if (dragging) {
         ui.suppressPageClick = true;
         if (to !== from && to !== from + 1) {
+          pushHistory();
           const target = to > from ? to - 1 : to;
           const moved = state.pages.splice(from, 1)[0];
           state.pages.splice(target, 0, moved);
@@ -995,14 +1080,35 @@
       { label: '增加一页应用', action: () => addPage() },
       { sep: true },
       { label: state.settings.launch === 'double' ? '启动方式：双击 → 改为单击' : '启动方式：单击 → 改为双击', action: () => {
+        pushHistory();
         state.settings.launch = state.settings.launch === 'double' ? 'single' : 'double';
         scheduleSave();
         updateStatusHint();
       } },
       { label: state.settings.showLabels ? '隐藏图标名称' : '显示图标名称', action: () => {
+        pushHistory();
         state.settings.showLabels = !state.settings.showLabels;
         scheduleSave();
         render();
+      } },
+      { label: '撤销历史上限：' + (state.settings.undoLimit || 100) + ' 条', action: () => {
+        const body = openDialog({
+          title: '撤销历史上限',
+          body: '<div class="field"><label>最多保留多少条操作记录（0=关闭撤销）</label><input class="input" id="undo-limit" type="number" min="0" max="1000" spellcheck="false"></div>',
+          buttons: [
+            { label: '取消', ghost: true },
+            { label: '保存', primary: true, onClick: () => {
+              const v = Math.max(0, Math.min(1000, Number(body.querySelector('#undo-limit').value) || 0));
+              state.settings.undoLimit = v;
+              // 裁剪到新上限
+              while (history.length > v) history.shift();
+              scheduleSave();
+              toast('撤销上限已设为 ' + v + ' 条', 'ok');
+              return true;
+            } },
+          ],
+        });
+        body.querySelector('#undo-limit').value = String(state.settings.undoLimit || 100);
       } },
       { sep: true },
       { label: '导入配置…', action: async () => {
@@ -1028,7 +1134,8 @@
       { label: '打开数据目录', action: () => api.openDataDir() },
       { sep: true },
       { label: '恢复默认布局', danger: true, action: () => {
-        confirmDialog('恢复默认布局？', '当前配置会被替换。', '恢复', () => {
+        confirmDialog('恢复默认布局？', '当前配置会被替换，可 Ctrl+Z 撤销。', '恢复', () => {
+          pushHistory();
           state = defaults();
           ui.activeCell = firstCellKey();
           scheduleSave();
@@ -1202,6 +1309,7 @@
     function save() {
       const target = trim(fTarget.value);
       if (!target) { toast('请填写启动目标', 'err'); return false; }
+      pushHistory();
       const name = trim(fName.value) || baseName(target.split('?')[0]);
       const emoji = trim(fEmoji.value);
       const icon = emoji ? { type: 'emoji', value: emoji } : (customIcon || { type: 'auto', value: '' });
@@ -1254,6 +1362,7 @@
       buttons: [
         { label: '取消', ghost: true },
         { label: '保存', primary: true, onClick: () => {
+          pushHistory();
           const name = trim(body.querySelector('#c-name').value);
           const bg = hexOrEmpty(body.querySelector('#c-bg').value);
           const border = hexOrEmpty(body.querySelector('#c-border').value);
@@ -1304,6 +1413,7 @@
       buttons: [
         { label: '取消', ghost: true },
         { label: '保存', primary: true, onClick: () => {
+          pushHistory();
           target.name = trim(body.querySelector('#h-name').value) || target.name;
           target.color = hexOrEmpty(body.querySelector('#h-color').value) || target.color;
           const size = Number(body.querySelector('#h-size').value);
@@ -1537,9 +1647,10 @@
       applyFilter();
     });
 
-    // 工具栏：图标大小（行高列宽按基准 54px↔110×100 等比联动）
+    // 工具栏：图标大小（行高列宽按基准 54px↔80×80 等比联动）
     const size = $('icon-size');
     size.value = String(state.settings.iconSize || 54);
+    size.addEventListener('pointerdown', () => pushHistory()); // 一次拖动只记一条历史
     size.addEventListener('input', () => {
       const v = Number(size.value);
       state.settings.iconSize = v;
@@ -1703,6 +1814,7 @@
         return;
       }
       const targetCell = cellOf(key, true);
+      pushHistory();
       paths.forEach((p) => {
         targetCell.items.push({
           id: Grid.newId('i'),
@@ -1748,6 +1860,11 @@
           e.preventDefault();
           openItemDialog(ui.activeCell || firstCellKey(), null);
         }
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey && e.altKey) return; // 留給系統
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        undo();
       }
     });
   }

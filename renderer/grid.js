@@ -36,6 +36,18 @@
     return 'file:///' + String(p).replace(/\\/g, '/');
   }
 
+  // 根据背景色自动选黑色/白色文字，保证可读性
+  function contrastColor(hex) {
+    const c = (hex || '').replace('#', '');
+    if (c.length !== 3 && c.length !== 6) return '#ffffff';
+    const full = c.length === 3 ? c.split('').map((x) => x + x).join('') : c;
+    const r = parseInt(full.slice(0, 2), 16);
+    const g = parseInt(full.slice(2, 4), 16);
+    const b = parseInt(full.slice(4, 6), 16);
+    const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    return lum > 0.55 ? '#1a1b1c' : '#ffffff';
+  }
+
   function tile(item, state) {
     const t = document.createElement('div');
     t.className = 'tile';
@@ -150,21 +162,20 @@
       h.dataset.id = col.id;
       h.style.gridColumn = String(i + 2);
       h.style.gridRow = '1';
+      const bg = col.color || '#5b6b7c';
+      h.style.background = bg;
+      h.style.color = contrastColor(bg);
 
       const grip = document.createElement('span');
       grip.className = 'grip';
       grip.dataset.grip = 'col';
       grip.title = '拖动调整列顺序';
 
-      const dot = document.createElement('span');
-      dot.className = 'dot';
-      dot.style.background = col.color || '#5b6b7c';
-
       const name = document.createElement('span');
       name.className = 'hname';
       name.textContent = col.name || '未命名';
 
-      h.append(grip, dot, name);
+      h.append(grip, name);
       container.appendChild(h);
     });
 
@@ -176,21 +187,20 @@
       rh.dataset.id = row.id;
       rh.style.gridColumn = '1';
       rh.style.gridRow = String(j + 2);
+      const bg = row.color || '#5b6b7c';
+      rh.style.background = bg;
+      rh.style.color = contrastColor(bg);
 
       const grip = document.createElement('span');
       grip.className = 'grip';
       grip.dataset.grip = 'row';
       grip.title = '拖动调整行顺序';
 
-      const dot = document.createElement('span');
-      dot.className = 'dot';
-      dot.style.background = row.color || '#5b6b7c';
-
       const name = document.createElement('span');
       name.className = 'hname';
       name.textContent = row.name || '未命名';
 
-      rh.append(grip, dot, name);
+      rh.append(grip, name);
       container.appendChild(rh);
 
       cols.forEach((col, i) => {
@@ -223,6 +233,28 @@
         }
 
         container.appendChild(c);
+      });
+    });
+
+    // 标题文字自适应：先缩小字体（最小10px），仍溢出则换行
+    requestAnimationFrame(() => {
+      container.querySelectorAll('.hname').forEach((el) => {
+        el.style.fontSize = '';
+        el.style.whiteSpace = 'nowrap';
+        el.style.wordBreak = 'normal';
+        const parent = el.parentElement;
+        const avail = parent ? parent.clientWidth - 16 : el.clientWidth;
+        if (avail <= 0) return;
+        let fs = 14;
+        while (fs > 10 && el.scrollWidth > avail) {
+          fs -= 1;
+          el.style.fontSize = fs + 'px';
+        }
+        if (fs <= 10 && el.scrollWidth > avail) {
+          el.style.whiteSpace = 'normal';
+          el.style.wordBreak = 'break-word';
+          el.style.lineHeight = '1.2';
+        }
       });
     });
   }
