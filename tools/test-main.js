@@ -51,6 +51,7 @@ const fakeElectron = {
   },
   Menu: { buildFromTemplate: (tpl) => ({ tpl }) },
   nativeImage: { createFromPath: (p) => ({ p }) },
+  net: { fetch: async () => ({ ok: false, headers: { get: () => '' }, arrayBuffer: async () => new ArrayBuffer(0) }) },
   BrowserWindow: FakeWindow,
   ipcMain: {
     handle: (ch, fn) => { handlers[ch] = fn; },

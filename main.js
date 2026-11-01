@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, screen, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -363,6 +363,46 @@ ipcMain.handle('target:reveal', async (_e, filePath) => {
     return { ok: false };
   }
 });
+
+/* ------------------------------ 网址图标本地化 ------------------------------ */
+// 主进程下载 favicon（不受浏览器 CORS 限制），转成 data URL 存进配置，
+// 之后启动直接读本地数据，不再每次联网抓取。
+
+function imageMimeOf(buf, contentType) {
+  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.length >= 4 && buf[0] === 0x00 && buf[1] === 0x00 && (buf[2] === 0x01 || buf[2] === 0x02) && buf[3] === 0x00) return 'image/x-icon';
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length >= 6 && buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'image/gif';
+  if (buf.length >= 12 && buf.slice(0, 4).toString('ascii') === 'RIFF' && buf.slice(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  if (buf.length >= 2 && buf[0] === 0x42 && buf[1] === 0x4d) return 'image/bmp';
+  const head = buf.slice(0, 300).toString('utf8').trim().toLowerCase();
+  if (head.startsWith('<svg') || head.startsWith('<?xml') || head.includes('<svg')) return 'image/svg+xml';
+  const ct = String(contentType || '').split(';')[0].trim().toLowerCase();
+  return /^image\//.test(ct) ? ct : null;
+}
+
+ipcMain.handle('icon:fetch-favicon', async (_e, url) => {
+  const target = String(url || '').trim();
+  if (!/^https?:/i.test(target)) return { ok: false };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await net.fetch(target, { signal: controller.signal, redirect: 'follow' });
+    if (!res || !res.ok) return { ok: false };
+    const buf = Buffer.from(await res.arrayBuffer());
+    // 过滤空响应与超大响应（有些站点会返回整页 HTML）
+    if (buf.length < 32 || buf.length > 512 * 1024) return { ok: false };
+    const mime = imageMimeOf(buf, res.headers.get('content-type'));
+    if (!mime) return { ok: false };
+    return { ok: true, dataUrl: 'data:' + mime + ';base64,' + buf.toString('base64') };
+  } catch (_) {
+    return { ok: false };
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
+ipcMain.handle('app:version', async () => app.getVersion());
 
 /* --------------------------------- 窗口控制 -------------------------------- */
 

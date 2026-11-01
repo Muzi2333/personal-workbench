@@ -22,6 +22,8 @@
         return { ok: false, error: '浏览器预览模式无法启动本地程序，请用 Electron 运行（npm start）' };
       },
       icon: async () => null,
+      fetchFavicon: async () => ({ ok: false }),
+      appVersion: async () => '',
       pick: async () => ({ ok: false, error: '预览模式无法调用文件选择器' }),
       reveal: async () => ({ ok: false }),
       pathForFile: () => '',
@@ -303,16 +305,41 @@
     });
   }
 
-  // 网址快捷方式：异步抓取网站 favicon（多个源兜底，第一个加载成功就用）
-  function fetchFavicon(url) {
-    let host = '';
-    try { host = new URL(url).hostname; } catch (_) { return Promise.resolve(null); }
-    if (!host) return Promise.resolve(null);
-    const candidates = [
+  // 网址快捷方式：异步抓取网站 favicon（多个源兜底，第一个成功就用）
+  // Electron 下由主进程下载并转成 data URL，存进配置 → 下次启动直接读本地，不再联网
+  function faviconCandidates(origin, host) {
+    // 站点自己的 favicon 最快最可靠（保留原协议与端口，兼容内网服务），公共图标服务作为兜底
+    return [
+      origin + '/favicon.ico',
       'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(host) + '&sz=64',
       'https://icons.duckduckgo.com/ip3/' + encodeURIComponent(host) + '.ico',
-      'https://' + host + '/favicon.ico',
     ];
+  }
+
+  async function fetchFavicon(url) {
+    let u = null;
+    try { u = new URL(url); } catch (_) { return null; }
+    const host = u.hostname;
+    if (!host) return null;
+    const candidates = faviconCandidates(u.origin, host);
+
+    if (isElectron) {
+      // 并行尝试几个源，谁先下载成功就用谁
+      return new Promise((resolve) => {
+        let done = false;
+        let pending = candidates.length;
+        const finish = (d) => { if (done) return; done = true; resolve(d || null); };
+        candidates.forEach((src) => {
+          Promise.resolve(api.fetchFavicon(src)).then((res) => {
+            if (res && res.ok && res.dataUrl) return finish(res.dataUrl);
+            if (--pending === 0) finish(null);
+          }).catch(() => { if (--pending === 0) finish(null); });
+        });
+        setTimeout(() => finish(null), 9000);
+      });
+    }
+
+    // 浏览器预览兜底：Image 探测可用源
     return new Promise((resolve) => {
       let done = false;
       const finish = (src) => { if (done) return; done = true; resolve(src); };
@@ -328,23 +355,28 @@
 
   async function requestIcons() {
     const targets = new Set();
-    const pageCells = curPage().cells;
     const urlTargets = [];
-    Object.keys(pageCells).forEach((key) => {
-      (pageCells[key].items || []).forEach((it) => {
-        const type = it.icon && it.icon.type ? it.icon.type : 'auto';
-        if (type === 'file') {
-          if (it.icon.value && !state.iconCache[it.icon.value]) targets.add(it.icon.value);
-          return;
-        }
-        if (type !== 'auto' || !it.target) return;
-        if (state.iconCache[it.target]) return;
-        if (/^https?:/i.test(it.target)) urlTargets.push(it.target);
-        else targets.add(it.target);
+    // 扫描所有页：切到其他页之前也先把图标缓存到本地
+    state.pages.forEach((page) => {
+      Object.keys(page.cells).forEach((key) => {
+        (page.cells[key].items || []).forEach((it) => {
+          const type = it.icon && it.icon.type ? it.icon.type : 'auto';
+          if (type === 'file') {
+            if (it.icon.value && !state.iconCache[it.icon.value]) targets.add(it.icon.value);
+            return;
+          }
+          if (type !== 'auto' || !it.target) return;
+          const isUrl = /^https?:/i.test(it.target);
+          const cached = state.iconCache[it.target];
+          // 已有本地图标（data:/file:）直接复用；只有缺失或仍是历史遗留的远程地址才重新抓取
+          if (cached && !(isUrl && /^https?:/i.test(cached))) return;
+          if (isUrl) urlTargets.push(it.target);
+          else targets.add(it.target);
+        });
       });
     });
 
-    // 网址：并行抓 favicon
+    // 网址：并行抓 favicon（成功即存为本地 data URL）
     const urlJobs = urlTargets.map(async (t) => {
       const src = await fetchFavicon(t);
       if (src) { state.iconCache[t] = src; return true; }
@@ -1143,7 +1175,53 @@
           requestIcons();
         });
       } },
+      { sep: true },
+      { label: '关于', action: openAbout },
     ]);
+  }
+
+  const REPO_URL = 'https://github.com/Muzi2333/personal-workbench';
+
+  function openAbout() {
+    const body = openDialog({
+      title: '关于',
+      body:
+        '<div class="about">' +
+          '<div class="about-top">' +
+            '<img class="about-ico" src="../assets/icon.png" alt="" />' +
+            '<div>' +
+              '<div class="about-name">工作台</div>' +
+              '<div class="about-desc">Win11 风格的桌面快捷方式宫格</div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="about-rows">' +
+            '<div class="about-row"><span>作者</span><b>Muzi_xy</b></div>' +
+            '<div class="about-row"><span>版本</span><b id="about-ver">—</b></div>' +
+            '<div class="about-row"><span>开源地址</span>' +
+              '<a href="' + REPO_URL + '" id="about-link">github.com/Muzi2333/personal-workbench</a>' +
+            '</div>' +
+          '</div>' +
+        '</div>',
+      buttons: [
+        { label: '关闭', ghost: true },
+        { label: '打开仓库', primary: true, onClick: () => { api.launch({ target: REPO_URL }); } },
+      ],
+    });
+
+    // 走主进程 shell.openExternal，交给系统默认浏览器（不在窗口内跳转）
+    const link = body.querySelector('#about-link');
+    if (link) {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        api.launch({ target: REPO_URL });
+      });
+    }
+    const ver = body.querySelector('#about-ver');
+    if (ver) {
+      Promise.resolve(api.appVersion()).then((v) => {
+        if (v) ver.textContent = 'v' + v;
+      }).catch(() => {});
+    }
   }
 
   /* ---------------------------------- 弹窗 ---------------------------------- */
