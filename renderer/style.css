@@ -290,6 +290,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   border-radius: 8px;
   color: var(--dim);
   font-size: 12px;
+  cursor: grab;
   background: transparent;
   transition: filter 0.14s;
 }
@@ -308,6 +309,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   padding: 10px 0;
   border-radius: 8px;
   color: var(--dim);
+  cursor: grab;
   font-size: 12px;
   background: transparent;
   transition: filter 0.14s;
@@ -329,30 +331,8 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   text-align: center;
 }
 
-.grip {
-  display: grid;
-  grid-template-columns: repeat(2, 2px);
-  gap: 2px;
-  padding: 3px;
-  border-radius: 4px;
-  cursor: grab;
-  opacity: 0;
-  transition: opacity 0.14s, background 0.14s;
-}
-.col-head .grip { position: absolute; left: 6px; top: 50%; transform: translateY(-50%); }
-.row-head .grip { position: absolute; top: 6px; left: 50%; transform: translateX(-50%); }
-.grip:active { cursor: grabbing; }
-.grip::before,
-.grip::after {
-  content: "";
-  width: 2px;
-  height: 12px;
-  background-image: radial-gradient(circle, #9aa0a5 1px, transparent 1.2px);
-  background-size: 2px 5px;
-}
-.col-head:hover .grip, .row-head:hover .grip { opacity: 1; }
-.row-head .grip { padding: 4px; }
-.row-head .grip::before, .row-head .grip::after { height: 8px; width: 8px; background-size: 5px 2px; }
+.col-head:active, .row-head:active { cursor: grabbing; }
+.col-head.is-dragging, .row-head.is-dragging { cursor: grabbing; opacity: 0.5; }
 
 /* 单元格 */
 

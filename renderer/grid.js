@@ -172,16 +172,11 @@
       h.style.background = bg;
       h.style.color = contrastColor(bg);
 
-      const grip = document.createElement('span');
-      grip.className = 'grip';
-      grip.dataset.grip = 'col';
-      grip.title = '拖动调整列顺序';
-
       const name = document.createElement('span');
       name.className = 'hname';
       name.textContent = col.name || '未命名';
 
-      h.append(grip, name);
+      h.appendChild(name);
       container.appendChild(h);
     });
 
@@ -198,16 +193,11 @@
         rh.style.background = bg;
         rh.style.color = contrastColor(bg);
 
-        const grip = document.createElement('span');
-        grip.className = 'grip';
-        grip.dataset.grip = 'row';
-        grip.title = '拖动调整行顺序';
-
         const name = document.createElement('span');
         name.className = 'hname';
         name.textContent = row.name || '未命名';
 
-        rh.append(grip, name);
+        rh.appendChild(name);
         container.appendChild(rh);
       }
 
@@ -254,24 +244,39 @@
       });
     });
 
-    // 标题文字自适应：先缩小字体（最小10px），仍溢出则换行
+    // 标题文字自适应：先缩小字体（最小10px），仍溢出则换行（最多 2 行）
     requestAnimationFrame(() => {
       container.querySelectorAll('.hname').forEach((el) => {
+        // 先把样式重置，再测量
         el.style.fontSize = '';
         el.style.whiteSpace = 'nowrap';
-        el.style.wordBreak = 'normal';
+        el.style.wordBreak = '';
+        el.style.lineHeight = '';
+        el.style.display = '';
+        el.style.webkitBoxOrient = '';
+        el.style.webkitLineClamp = '';
         const parent = el.parentElement;
         const avail = parent ? parent.clientWidth - 16 : el.clientWidth;
         if (avail <= 0) return;
+
+        // 优先缩小字体（最小 10px）
         let fs = 14;
         while (fs > 10 && el.scrollWidth > avail) {
           fs -= 1;
           el.style.fontSize = fs + 'px';
         }
+
+        // 字体已到最小仍溢出：允许换行，最多 2 行（行头为竖排文字，换行即多列，故行头不换行）
         if (fs <= 10 && el.scrollWidth > avail) {
-          el.style.whiteSpace = 'normal';
-          el.style.wordBreak = 'break-word';
-          el.style.lineHeight = '1.2';
+          const vm = (getComputedStyle(el).writingMode || '').toLowerCase();
+          if (vm.indexOf('vertical') === -1) {
+            el.style.whiteSpace = 'normal';
+            el.style.wordBreak = 'break-word';
+            el.style.lineHeight = '1.2';
+            el.style.display = '-webkit-box';
+            el.style.webkitBoxOrient = 'vertical';
+            el.style.webkitLineClamp = '2';
+          }
         }
       });
     });

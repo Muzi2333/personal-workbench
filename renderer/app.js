@@ -851,8 +851,8 @@
   }
 
   function startHeaderDrag(ev, axis, headEl) {
-    ev.preventDefault();
     ev.stopPropagation();
+    // 注意：不调用 preventDefault，这样未产生位移时点击 / 双击仍可正常触发
 
     const id = headEl.dataset.id;
     const page = curPage();
@@ -860,15 +860,27 @@
     const from = list.findIndex((x) => x.id === id);
     if (from < 0) return;
 
+    const startX = ev.clientX;
+    const startY = ev.clientY;
     const heads = Array.from(el.grid.querySelectorAll(axis === 'row' ? '.row-head' : '.col-head'));
-    const line = document.createElement('div');
-    line.className = 'drop-line';
-    document.body.appendChild(line);
-    headEl.classList.add('is-dragging');
-
+    let line = null;
     let to = from;
+    let dragging = false;
+
+    const beginDrag = () => {
+      dragging = true;
+      line = document.createElement('div');
+      line.className = 'drop-line';
+      document.body.appendChild(line);
+      headEl.classList.add('is-dragging');
+    };
 
     const onMove = (e) => {
+      if (!dragging) {
+        // 移动不足 7px 视为点击，不进入拖拽
+        if (Math.hypot(e.clientX - startX, e.clientY - startY) < 7) return;
+        beginDrag();
+      }
       const rects = heads.map((h) => h.getBoundingClientRect());
       const pos = axis === 'row' ? e.clientY : e.clientX;
       let insert = 0;
@@ -880,6 +892,7 @@
 
       const first = rects[0];
       const last = rects[rects.length - 1];
+      if (!first) return;
       if (axis === 'row') {
         const y = insert < rects.length ? rects[insert].top - 5 : last.bottom + 5;
         line.style.cssText = 'display:block;left:' + first.left + 'px;top:' + y + 'px;width:' + (last.right - first.left) + 'px;height:2px;';
@@ -892,6 +905,7 @@
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      if (!dragging) return; // 未移动：当作普通点击，不重排行列
       line.remove();
       headEl.classList.remove('is-dragging');
 
@@ -906,7 +920,6 @@
       }
     };
 
-    onMove({ clientX: ev.clientX, clientY: ev.clientY });
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
   }
@@ -1439,10 +1452,14 @@
   }
 
   function bindColorPair(hexId, pickerId) {
-    const hex = $(hexId);
-    const picker = $(pickerId);
+    const hex = document.querySelector(hexId);
+    const picker = document.querySelector(pickerId);
     if (!hex || !picker) return;
-    picker.addEventListener('input', () => { hex.value = picker.value; });
+    // 颜色选择器（<input type="color">）在不同环境下可能触发 input 或 change，
+    // 两个事件都监听，确保选好颜色后 HEX 输入框同步更新
+    const syncFromPicker = () => { hex.value = picker.value; };
+    picker.addEventListener('input', syncFromPicker);
+    picker.addEventListener('change', syncFromPicker);
     hex.addEventListener('input', () => {
       const v = hexOrEmpty(hex.value);
       if (v) picker.value = v;
@@ -1978,10 +1995,10 @@
         return;
       }
 
-      const grip = e.target.closest('.grip');
-      if (grip) {
-        const head = grip.closest('[data-axis]');
-        if (head) startHeaderDrag(e, head.dataset.axis, head);
+      // 整个表头都可以拖拽（不再依赖小把手），移动超过阈值才算拖拽，否则保留点击/双击行为
+      const head = e.target.closest('[data-axis]');
+      if (head) {
+        startHeaderDrag(e, head.dataset.axis, head);
         return;
       }
 
