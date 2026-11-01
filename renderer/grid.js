@@ -135,7 +135,7 @@
     if (!cols.length || !rows.length) {
       const empty = document.createElement('div');
       empty.className = 'grid-empty';
-      empty.textContent = (page && page.emptyText) || '至少需要一行一列：右键画布空白处，或点右上角「⋯」菜单添加';
+      empty.textContent = (page && page.emptyText) || '至少需要一行一列：右键画布空白处即可添加';
       container.style.display = 'block';
       container.appendChild(empty);
       return;
@@ -255,8 +255,32 @@
         el.style.display = '';
         el.style.webkitBoxOrient = '';
         el.style.webkitLineClamp = '';
+        el.style.maxWidth = '';
+        el.style.maxHeight = '';
         const parent = el.parentElement;
-        const avail = parent ? parent.clientWidth - 16 : el.clientWidth;
+        if (!parent) return;
+        const vertical = (getComputedStyle(el).writingMode || '').toLowerCase().indexOf('vertical') !== -1;
+
+        if (vertical) {
+          // 行头是竖排文字：沿高度方向排布，溢出的是「高」，必须按 scrollHeight 判断
+          const availH = parent.clientHeight - 20; // row-head 上下 padding 各 10px
+          if (availH <= 0) return;
+          let fs = 14;
+          while (fs > 10 && el.scrollHeight > availH) {
+            fs -= 1;
+            el.style.fontSize = fs + 'px';
+          }
+          // 已到最小仍超高：竖排的「换行」即换列，最多 2 列，超出裁剪
+          if (fs <= 10 && el.scrollHeight > availH) {
+            el.style.whiteSpace = 'normal';
+            el.style.lineHeight = '1.15';
+            el.style.maxHeight = availH + 'px';
+            el.style.maxWidth = Math.ceil(2 * (fs * 1.15 + 2)) + 2 + 'px';
+          }
+          return;
+        }
+
+        const avail = parent.clientWidth - 16;
         if (avail <= 0) return;
 
         // 优先缩小字体（最小 10px）
@@ -266,17 +290,14 @@
           el.style.fontSize = fs + 'px';
         }
 
-        // 字体已到最小仍溢出：允许换行，最多 2 行（行头为竖排文字，换行即多列，故行头不换行）
+        // 字体已到最小仍溢出：允许换行，最多 2 行
         if (fs <= 10 && el.scrollWidth > avail) {
-          const vm = (getComputedStyle(el).writingMode || '').toLowerCase();
-          if (vm.indexOf('vertical') === -1) {
-            el.style.whiteSpace = 'normal';
-            el.style.wordBreak = 'break-word';
-            el.style.lineHeight = '1.2';
-            el.style.display = '-webkit-box';
-            el.style.webkitBoxOrient = 'vertical';
-            el.style.webkitLineClamp = '2';
-          }
+          el.style.whiteSpace = 'normal';
+          el.style.wordBreak = 'break-word';
+          el.style.lineHeight = '1.2';
+          el.style.display = '-webkit-box';
+          el.style.webkitBoxOrient = 'vertical';
+          el.style.webkitLineClamp = '2';
         }
       });
     });

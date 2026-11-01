@@ -65,6 +65,7 @@
     activeCell: null,
     lastTap: { item: '', t: 0 },
     searchPage: null, // 搜索结果临时页（不落盘）
+    settingsOpen: false, // 设置页（侧栏齿轮进入，不落盘）
   };
 
   const el = {};
@@ -156,7 +157,7 @@
       version: 3,
       pages: [{ id: 'p1', name: '主页', rows, cols, cells, layout: { gap: 10 } }],
       activePage: 'p1',
-      settings: { iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100 },
+      settings: { iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false },
       iconCache: {},
     };
   }
@@ -218,12 +219,12 @@
 
     if (!data.pages.some((p) => p.id === data.activePage)) data.activePage = data.pages[0].id;
 
-    data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100 }, data.settings || {});
+    data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false }, data.settings || {});
     data.iconCache = data.iconCache || {};
-    // 图标缓存版本：图标升级为 256px 高清提取，清掉全部旧缓存强制重取
-    if (data.cacheVer !== 3) {
+    // 图标缓存版本：新增 UWP 应用图标解析，清掉全部旧缓存强制重取
+    if (data.cacheVer !== 4) {
       data.iconCache = {};
-      data.cacheVer = 3;
+      data.cacheVer = 4;
     }
     return data;
   }
@@ -260,11 +261,149 @@
     const canvas = el.canvas;
     const sx = canvas.scrollLeft;
     const sy = canvas.scrollTop;
-    Grid.render(el.grid, viewPage(), state);
+    if (ui.settingsOpen) renderSettingsPage();
+    else Grid.render(el.grid, viewPage(), state);
     canvas.scrollLeft = sx;
     canvas.scrollTop = sy;
     updateStatusHint();
     renderSidebar();
+  }
+
+  /* --------------------------------- 设置页 --------------------------------- */
+
+  function openSettings() {
+    exitSearch(true);
+    const s = $('search');
+    if (s) s.value = '';
+    el.tbSearch.classList.add('hidden');
+    $('btn-search').classList.remove('hidden');
+    ui.settingsOpen = true;
+    render();
+  }
+
+  function closeSettings() {
+    if (!ui.settingsOpen) return;
+    ui.settingsOpen = false;
+    render();
+  }
+
+  // 设置页：渲染进宫格区域，包含原设置菜单内容（不含 4 个添加按钮）
+  function renderSettingsPage() {
+    const s = state.settings;
+    el.grid.style.display = 'block';
+    el.grid.innerHTML = [
+      '<div class="settings-page">',
+      '  <div class="settings-head">',
+      '    <button class="btn" id="st-back">‹ 返回</button>',
+      '    <span class="settings-title">设置</span>',
+      '  </div>',
+      '  <div class="set-group">',
+      '    <div class="set-row">',
+      '      <div class="set-label">启动方式<span class="set-desc">点击图标时的启动方式</span></div>',
+      '      <div class="seg" id="st-launch">',
+      '        <button data-v="single"' + (s.launch !== 'double' ? ' class="on"' : '') + '>单击</button>',
+      '        <button data-v="double"' + (s.launch === 'double' ? ' class="on"' : '') + '>双击</button>',
+      '      </div>',
+      '    </div>',
+      '    <div class="set-row">',
+      '      <div class="set-label">图标名称<span class="set-desc">在图标下方显示名称</span></div>',
+      '      <button class="switch' + (s.showLabels ? ' on' : '') + '" id="st-labels" role="switch" title="显示 / 隐藏图标名称"></button>',
+      '    </div>',
+      '    <div class="set-row">',
+      '      <div class="set-label">撤销历史上限<span class="set-desc">最多保留多少条操作记录，0 = 关闭撤销</span></div>',
+      '      <input class="input set-num" id="st-undo" type="number" min="0" max="1000" value="' + (s.undoLimit || 0) + '">',
+      '    </div>',
+      '  </div>',
+      '  <div class="set-group">',
+      '    <div class="set-group-title">数据</div>',
+      '    <div class="set-row btns">',
+      '      <button class="btn" id="st-import">导入配置…</button>',
+      '      <button class="btn" id="st-export">导出配置…</button>',
+      '      <button class="btn" id="st-datadir">打开数据目录</button>',
+      '    </div>',
+      '  </div>',
+      '  <div class="set-group">',
+      '    <div class="set-group-title">布局</div>',
+      '    <div class="set-row btns">',
+      '      <button class="btn danger" id="st-reset">恢复默认布局</button>',
+      '    </div>',
+      '  </div>',
+      '  <div class="set-group">',
+      '    <div class="set-row btns">',
+      '      <button class="btn ghost" id="st-about">关于工作台</button>',
+      '    </div>',
+      '  </div>',
+      '</div>',
+    ].join('');
+
+    el.grid.querySelector('#st-back').addEventListener('click', closeSettings);
+
+    el.grid.querySelector('#st-launch').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-v]');
+      if (!b || b.classList.contains('on')) return;
+      pushHistory();
+      state.settings.launch = b.dataset.v;
+      scheduleSave();
+      render();
+    });
+
+    el.grid.querySelector('#st-labels').addEventListener('click', () => {
+      pushHistory();
+      state.settings.showLabels = !state.settings.showLabels;
+      scheduleSave();
+      render();
+    });
+
+    el.grid.querySelector('#st-undo').addEventListener('change', (e) => {
+      const v = Math.max(0, Math.min(1000, Number(e.target.value) || 0));
+      e.target.value = String(v);
+      if (v === state.settings.undoLimit) return;
+      pushHistory();
+      state.settings.undoLimit = v;
+      while (history.length > v) history.shift();
+      scheduleSave();
+      toast('撤销上限已设为 ' + v + ' 条', 'ok');
+    });
+
+    el.grid.querySelector('#st-import').addEventListener('click', async () => {
+      const res = await api.importData();
+      if (!res || !res.ok) {
+        if (res && res.error) toast(res.error, 'err');
+        return;
+      }
+      const next = normalize(res.data);
+      if (!next) { toast('配置文件格式不正确', 'err'); return; }
+      state = next;
+      ui.activeCell = firstCellKey();
+      updateLockBtn();
+      scheduleSave();
+      render();
+      requestIcons();
+      toast('配置已导入', 'ok');
+    });
+
+    el.grid.querySelector('#st-export').addEventListener('click', async () => {
+      const res = await api.exportData(state);
+      if (res && res.ok) toast('已导出到 ' + res.path, 'ok');
+      else if (res && res.error) toast(res.error, 'err');
+    });
+
+    el.grid.querySelector('#st-datadir').addEventListener('click', () => api.openDataDir());
+
+    el.grid.querySelector('#st-reset').addEventListener('click', () => {
+      confirmDialog('恢复默认布局？', '当前配置会被替换，可 Ctrl+Z 撤销。', '恢复', () => {
+        pushHistory();
+        state = defaults();
+        ui.activeCell = firstCellKey();
+        ui.settingsOpen = false;
+        updateLockBtn();
+        scheduleSave();
+        render();
+        requestIcons();
+      });
+    });
+
+    el.grid.querySelector('#st-about').addEventListener('click', openAbout);
   }
 
   /* -------------------------------- 全局搜索 -------------------------------- */
@@ -411,7 +550,9 @@
   function updateStatusHint() {
     el.hint.innerHTML = '';
     let parts;
-    if (ui.searchPage) {
+    if (ui.settingsOpen) {
+      parts = ['设置', '点左上角「‹ 返回」或按 Esc 回到宫格'];
+    } else if (ui.searchPage) {
       const sp = ui.searchPage;
       parts = [
         sp.hitCount
@@ -426,8 +567,8 @@
       parts = [
         p.rows.length + ' 行 · ' + p.cols.length + ' 列 · ' + total + ' 个图标',
         state.settings.launch === 'double' ? '双击启动' : '单击启动',
-        '拖动图标到别的格子即可成组',
-        '拖动表头把手可整行/整列移动',
+        state.settings.locked ? '布局已锁定，点顶栏锁按钮解锁' : '拖动图标到别的格子即可成组',
+        '拖动表头可整行/整列移动',
       ];
     }
     parts.forEach((txt, i) => {
@@ -736,6 +877,7 @@
     const startX = ev.clientX;
     const startY = ev.clientY;
     let moved = false;
+    let blocked = false; // 锁定状态下的拖动尝试
     let ghost = null;
     // 驻足合并：目标格只有 1 个图标且不是源格时，悬停 700ms 武装合并
     const dwell = makeDwellMerge((k) => {
@@ -747,10 +889,12 @@
     const onMove = (e) => {
       if (!moved) {
         if (Math.hypot(e.clientX - startX, e.clientY - startY) < 7) return;
+        if (state.settings.locked) { blocked = true; toast('布局已锁定，点顶栏锁按钮解锁后再拖动', 'err'); return; }
         moved = true;
         ghost = makeGhost(node);
         if (node) node.classList.add('is-dragging');
       }
+      if (blocked) return;
       const size = Number(ghost.dataset.size) || 54;
       ghost.style.transform = 'translate(' + (e.clientX - size / 2) + 'px,' + (e.clientY - size / 2) + 'px)';
       highlightCell(e.clientX, e.clientY, cellKey);
@@ -768,6 +912,7 @@
       const mergeKey = dwell.armed();
       dwell.reset();
 
+      if (blocked) return; // 锁定下的拖动尝试：不启动也不移动
       if (!moved) {
         handleIconTap(item);
         return;
@@ -811,15 +956,18 @@
     const startX = ev.clientX;
     const startY = ev.clientY;
     let moved = false;
+    let blocked = false;
     let ghost = null;
 
     const onMove = (e) => {
       if (!moved) {
         if (Math.hypot(e.clientX - startX, e.clientY - startY) < 7) return;
+        if (state.settings.locked) { blocked = true; toast('布局已锁定，点顶栏锁按钮解锁后再拖动', 'err'); return; }
         moved = true;
         ghost = makeGhost(node);
         if (node) node.classList.add('is-dragging');
       }
+      if (blocked) return;
       const size = Number(ghost.dataset.size) || 54;
       ghost.style.transform = 'translate(' + (e.clientX - size / 2) + 'px,' + (e.clientY - size / 2) + 'px)';
       highlightCell(e.clientX, e.clientY, cellKey);
@@ -834,6 +982,7 @@
       clearHighlight();
       clearPageHover();
 
+      if (blocked) return;
       if (!moved) {
         openFolder(cellKey);
         return;
@@ -997,9 +1146,13 @@
       el.pageList.appendChild(b);
     }
 
+    // 设置页打开时：齿轮高亮，页项都不高亮
+    const btnSettings = $('btn-settings');
+    if (btnSettings) btnSettings.classList.toggle('active', ui.settingsOpen);
+
     state.pages.forEach((p) => {
       const b = document.createElement('button');
-      b.className = 'page-item' + (p.id === state.activePage && !ui.searchPage ? ' active' : '');
+      b.className = 'page-item' + (p.id === state.activePage && !ui.searchPage && !ui.settingsOpen ? ' active' : '');
       b.dataset.id = p.id;
       const name = document.createElement('span');
       name.className = 'page-name';
@@ -1019,10 +1172,13 @@
   }
 
   function switchPage(id) {
+    // 切换页面时退出设置页 / 搜索页
+    const wasSettings = ui.settingsOpen;
+    ui.settingsOpen = false;
     // 从搜索结果页切到真实页：先退出搜索，再切换
     const wasSearch = exitSearch(true);
     if (id === state.activePage) {
-      if (wasSearch) render();
+      if (wasSearch || wasSettings) render();
       return;
     }
     state.activePage = id;
@@ -1288,80 +1444,23 @@
     ]);
   }
 
-  function openToolbarMenu(x, y) {
-    openMenu(x, y, [
-      { label: '添加快捷方式', action: () => openItemDialog(ui.activeCell || firstCellKey(), null) },
-      { label: '添加一行', action: () => insertRow(curPage().rows.length) },
-      { label: '添加一列', action: () => insertCol(curPage().cols.length) },
-      { label: '增加一页应用', action: () => addPage() },
-      { sep: true },
-      { label: state.settings.launch === 'double' ? '启动方式：双击 → 改为单击' : '启动方式：单击 → 改为双击', action: () => {
-        pushHistory();
-        state.settings.launch = state.settings.launch === 'double' ? 'single' : 'double';
-        scheduleSave();
-        updateStatusHint();
-      } },
-      { label: state.settings.showLabels ? '隐藏图标名称' : '显示图标名称', action: () => {
-        pushHistory();
-        state.settings.showLabels = !state.settings.showLabels;
-        scheduleSave();
-        render();
-      } },
-      { label: '撤销历史上限：' + (state.settings.undoLimit || 100) + ' 条', action: () => {
-        const body = openDialog({
-          title: '撤销历史上限',
-          body: '<div class="field"><label>最多保留多少条操作记录（0=关闭撤销）</label><input class="input" id="undo-limit" type="number" min="0" max="1000" spellcheck="false"></div>',
-          buttons: [
-            { label: '取消', ghost: true },
-            { label: '保存', primary: true, onClick: () => {
-              const v = Math.max(0, Math.min(1000, Number(body.querySelector('#undo-limit').value) || 0));
-              state.settings.undoLimit = v;
-              // 裁剪到新上限
-              while (history.length > v) history.shift();
-              scheduleSave();
-              toast('撤销上限已设为 ' + v + ' 条', 'ok');
-              return true;
-            } },
-          ],
-        });
-        body.querySelector('#undo-limit').value = String(state.settings.undoLimit || 100);
-      } },
-      { sep: true },
-      { label: '导入配置…', action: async () => {
-        const res = await api.importData();
-        if (!res || !res.ok) {
-          if (res && res.error) toast(res.error, 'err');
-          return;
-        }
-        const next = normalize(res.data);
-        if (!next) { toast('配置文件格式不正确', 'err'); return; }
-        state = next;
-        ui.activeCell = firstCellKey();
-        scheduleSave();
-        render();
-        requestIcons();
-        toast('配置已导入', 'ok');
-      } },
-      { label: '导出配置…', action: async () => {
-        const res = await api.exportData(state);
-        if (res && res.ok) toast('已导出到 ' + res.path, 'ok');
-        else if (res && res.error) toast(res.error, 'err');
-      } },
-      { label: '打开数据目录', action: () => api.openDataDir() },
-      { sep: true },
-      { label: '恢复默认布局', danger: true, action: () => {
-        confirmDialog('恢复默认布局？', '当前配置会被替换，可 Ctrl+Z 撤销。', '恢复', () => {
-          pushHistory();
-          state = defaults();
-          ui.activeCell = firstCellKey();
-          scheduleSave();
-          render();
-          requestIcons();
-        });
-      } },
-      { sep: true },
-      { label: '关于', action: openAbout },
-    ]);
+  /* --------------------------------- 布局锁定 --------------------------------- */
+
+  // 锁定后禁止拖动图标（点击启动不受影响），防止误触挪动
+  function updateLockBtn() {
+    const btn = $('btn-lock');
+    if (!btn) return;
+    const locked = !!state.settings.locked;
+    btn.classList.toggle('locked', locked);
+    btn.title = locked ? '已锁定：禁止拖动图标，点击解锁' : '锁定布局：禁止拖动图标';
+  }
+
+  function toggleLock() {
+    state.settings.locked = !state.settings.locked;
+    updateLockBtn();
+    scheduleSave();
+    updateStatusHint();
+    toast(state.settings.locked ? '已锁定布局，图标不能拖动了' : '已解锁，可以拖动图标', 'ok');
   }
 
   const REPO_URL = 'https://github.com/Muzi2333/personal-workbench';
@@ -1716,6 +1815,7 @@
       const startY = ev.clientY;
       const dialogBox = node.closest('.dialog');
       let mode = null; // 'reorder' | 'out'
+      let blocked = false;
       let ghost = null;
       let insertAt = -1;
       // 驻足合并：目标格只有 1 个图标且不是源格时，悬停 700ms 武装合并
@@ -1732,10 +1832,12 @@
       const onMove = (e) => {
         if (!mode) {
           if (Math.hypot(e.clientX - startX, e.clientY - startY) < 7) return;
+          if (state.settings.locked) { blocked = true; toast('布局已锁定，点顶栏锁按钮解锁后再拖动', 'err'); return; }
           mode = 'reorder';
           ghost = makeGhost(node);
           node.classList.add('is-dragging');
         }
+        if (blocked) return;
         const size = Number(ghost.dataset.size) || 54;
         ghost.style.transform = 'translate(' + (e.clientX - size / 2) + 'px,' + (e.clientY - size / 2) + 'px)';
 
@@ -1779,6 +1881,7 @@
         const mergeKey = dwell.armed();
         dwell.reset();
 
+        if (blocked) return; // 锁定下的拖动尝试：不启动也不移动
         if (!mode) { launchItem(item); return; }
 
         if (mode === 'reorder') {
@@ -1931,9 +2034,14 @@
       render();
     });
 
-    $('btn-menu').addEventListener('click', (e) => {
-      const rect = e.currentTarget.getBoundingClientRect();
-      openToolbarMenu(rect.right - 190, rect.bottom + 6);
+    // 锁定布局：禁止拖动图标
+    $('btn-lock').addEventListener('click', toggleLock);
+    updateLockBtn();
+
+    // 侧栏底部齿轮：进入 / 退出设置页
+    $('btn-settings').addEventListener('click', () => {
+      if (ui.settingsOpen) closeSettings();
+      else openSettings();
     });
 
     // 侧边栏：点击持久显隐；隐藏状态下悬停按钮可临时弹出使用
@@ -2034,6 +2142,9 @@
     el.grid.addEventListener('contextmenu', (e) => {
       e.preventDefault();
 
+      // 设置页：不弹任何右键菜单
+      if (ui.settingsOpen) return;
+
       // 搜索结果页：右键打开所在页面
       if (ui.searchPage) {
         const iconNode = e.target.closest('.icon');
@@ -2078,7 +2189,7 @@
       if (!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'))) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'copy';
-      if (ui.searchPage) return;
+      if (ui.searchPage || ui.settingsOpen) return;
       const cell = e.target.closest('.cell');
       if (cell) cell.classList.add('drop-hover');
     });
@@ -2088,7 +2199,8 @@
     });
     el.canvas.addEventListener('drop', (e) => {
       e.preventDefault();
-      // 搜索结果页只读：不允许把文件加进去
+      // 设置页 / 搜索结果页只读：不允许把文件加进去
+      if (ui.settingsOpen) return;
       if (ui.searchPage) {
         toast('搜索结果页不能添加图标，按 Esc 退出搜索后再拖入', 'err');
         return;
@@ -2135,19 +2247,22 @@
       if (e.key === 'Escape') {
         closeMenu();
         if (!el.overlay.classList.contains('hidden')) closeDialog();
+        // 设置页：Esc 返回宫格
+        if (ui.settingsOpen) closeSettings();
         // 搜索框内 Esc 或正处于搜索结果页：清空并退出搜索
         if (document.activeElement === search || ui.searchPage) {
           toggleSearch(false);
           search.blur();
         }
       }
-      if (e.key === '/' && document.activeElement !== search && el.overlay.classList.contains('hidden')) {
+      if (e.key === '/' && document.activeElement !== search && el.overlay.classList.contains('hidden') && !ui.settingsOpen) {
         e.preventDefault();
         toggleSearch(true);
       }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
         if (el.overlay.classList.contains('hidden')) {
           e.preventDefault();
+          if (ui.settingsOpen) return;
           if (ui.searchPage) { toast('搜索结果页不能添加图标，按 Esc 退出搜索后再试', 'err'); return; }
           openItemDialog(ui.activeCell || firstCellKey(), null);
         }
