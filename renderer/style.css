@@ -808,8 +808,10 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .menu-sep { height: 1px; margin: 5px 6px; background: rgba(255, 255, 255, 0.07); }
 
 /* 浮动拖拽影子 */
+/* 注意：必须用独立类名 drag-ghost，不能叫 ghost——会与 .btn.ghost（幽灵按钮）冲突，
+   曾导致所有对话框"取消"按钮和设置页"关于"按钮被 fixed 定位到窗口左上角 */
 
-.ghost {
+.drag-ghost {
   position: fixed;
   z-index: 60;
   left: 0; top: 0;
@@ -817,13 +819,13 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   opacity: 0.92;
   transform-origin: 0 0;
 }
-.ghost .tile {
+.drag-ghost .tile {
   width: var(--icon-size);
   height: var(--icon-size);
   background: rgba(38, 40, 42, 0.95);
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.45);
 }
-.ghost .folder-stack {
+.drag-ghost .folder-stack {
   width: var(--icon-size);
   height: var(--icon-size);
   background: rgba(38, 40, 42, 0.95);

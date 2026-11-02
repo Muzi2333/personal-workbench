@@ -23,6 +23,7 @@
       },
       icon: async () => null,
       fetchFavicon: async () => ({ ok: false }),
+      faviconFromPage: async () => ({ ok: false }),
       appVersion: async () => '',
       pick: async () => ({ ok: false, error: '预览模式无法调用文件选择器' }),
       reveal: async () => ({ ok: false }),
@@ -329,8 +330,18 @@
       '    </div>',
       '  </div>',
       '  <div class="set-group">',
-      '    <div class="set-row btns">',
-      '      <button class="btn ghost" id="st-about">关于工作台</button>',
+      '    <div class="set-group-title">关于</div>',
+      '    <div class="about-top">',
+      '      <img class="about-ico" src="../assets/icon.png" alt="" />',
+      '      <div>',
+      '        <div class="about-name">工作台</div>',
+      '        <div class="about-desc">Win11 风格的桌面快捷方式宫格</div>',
+      '      </div>',
+      '    </div>',
+      '    <div class="about-rows">',
+      '      <div class="about-row"><span>作者</span><b>Muzi_xy</b></div>',
+      '      <div class="about-row"><span>版本</span><b id="st-about-ver">—</b></div>',
+      '      <div class="about-row"><span>开源地址</span><a href="' + REPO_URL + '" id="st-about-link">github.com/Muzi2333/personal-workbench</a></div>',
       '    </div>',
       '  </div>',
       '</div>',
@@ -412,7 +423,20 @@
       });
     });
 
-    el.grid.querySelector('#st-about').addEventListener('click', openAbout);
+    // 关于区块：开源地址点击走系统浏览器；版本号从主进程取
+    const aboutLink = el.grid.querySelector('#st-about-link');
+    if (aboutLink) {
+      aboutLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        api.launch({ target: REPO_URL });
+      });
+    }
+    const aboutVer = el.grid.querySelector('#st-about-ver');
+    if (aboutVer) {
+      Promise.resolve(api.appVersion()).then((v) => {
+        if (v) aboutVer.textContent = 'v' + v;
+      }).catch(() => {});
+    }
   }
 
   /* -------------------------------- 全局搜索 -------------------------------- */
@@ -798,7 +822,7 @@
 
   function makeGhost(node) {
     const g = document.createElement('div');
-    g.className = 'ghost';
+    g.className = 'drag-ghost';
     // 分组优先取整个缩略堆叠，单个图标取 tile
     const src = node ? node.querySelector('.folder-stack') || node.querySelector('.tile') : null;
     if (src) {
@@ -1477,48 +1501,6 @@
   }
 
   const REPO_URL = 'https://github.com/Muzi2333/personal-workbench';
-
-  function openAbout() {
-    const body = openDialog({
-      title: '关于',
-      body:
-        '<div class="about">' +
-          '<div class="about-top">' +
-            '<img class="about-ico" src="../assets/icon.png" alt="" />' +
-            '<div>' +
-              '<div class="about-name">工作台</div>' +
-              '<div class="about-desc">Win11 风格的桌面快捷方式宫格</div>' +
-            '</div>' +
-          '</div>' +
-          '<div class="about-rows">' +
-            '<div class="about-row"><span>作者</span><b>Muzi_xy</b></div>' +
-            '<div class="about-row"><span>版本</span><b id="about-ver">—</b></div>' +
-            '<div class="about-row"><span>开源地址</span>' +
-              '<a href="' + REPO_URL + '" id="about-link">github.com/Muzi2333/personal-workbench</a>' +
-            '</div>' +
-          '</div>' +
-        '</div>',
-      buttons: [
-        { label: '关闭', ghost: true },
-        { label: '打开仓库', primary: true, onClick: () => { api.launch({ target: REPO_URL }); } },
-      ],
-    });
-
-    // 走主进程 shell.openExternal，交给系统默认浏览器（不在窗口内跳转）
-    const link = body.querySelector('#about-link');
-    if (link) {
-      link.addEventListener('click', (e) => {
-        e.preventDefault();
-        api.launch({ target: REPO_URL });
-      });
-    }
-    const ver = body.querySelector('#about-ver');
-    if (ver) {
-      Promise.resolve(api.appVersion()).then((v) => {
-        if (v) ver.textContent = 'v' + v;
-      }).catch(() => {});
-    }
-  }
 
   /* ---------------------------------- 弹窗 ---------------------------------- */
 
