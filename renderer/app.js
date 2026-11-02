@@ -109,6 +109,9 @@
   const ui = {
     q: '',
     activeCell: null,
+    hoverItem: null, // 鼠标当前悬停的图标 { itemId, cellKey }（Delete 键删除用）
+    folderDialogKey: null, // 当前打开的文件夹弹窗所在格子 key（用于文件夹内 Delete 删除）
+    shortcutListening: null, // 正在录制快捷键的 action id（null = 未在录制）
     lastTap: { item: '', t: 0 },
     searchPage: null, // 搜索结果临时页（不落盘）
     settingsOpen: false, // 设置页（侧栏齿轮进入，不落盘）
@@ -132,7 +135,48 @@
     saveTimer = setTimeout(() => { api.saveData(state); }, 260);
   }
 
-  /* ---------- 撤销历史（Ctrl+Z） ---------- */
+  /* ---------- 快捷键（可配置） ---------- */
+  // fixed=true 表示系统固定键（Enter / Esc），只展示不允许修改
+  const SHORTCUT_DEFS = [
+    { id: 'delete', name: '删除应用', desc: '删除鼠标悬停的应用（弹确认框，回车确认）', def: 'Delete' },
+    { id: 'add', name: '添加应用', desc: '在当前格子添加快捷方式', def: 'Ctrl+N' },
+    { id: 'search', name: '打开搜索', desc: '聚焦标题栏搜索框', def: '/' },
+    { id: 'undo', name: '撤销', desc: '撤销上一步操作', def: 'Ctrl+Z' },
+    { id: 'confirm', name: '确认弹窗', desc: '确认当前弹窗的主按钮', def: 'Enter', fixed: true },
+    { id: 'cancel', name: '关闭 / 取消', desc: '关闭弹窗、菜单、搜索或退出设置', def: 'Esc', fixed: true },
+  ];
+  const SHORTCUT_DEFAULTS = SHORTCUT_DEFS.reduce((o, s) => { o[s.id] = s.def; return o; }, {});
+
+  function getShortcuts() {
+    const s = (state && state.settings && state.settings.shortcuts) || {};
+    return Object.assign({}, SHORTCUT_DEFAULTS, s);
+  }
+  function getShortcut(id) {
+    return getShortcuts()[id] || SHORTCUT_DEFAULTS[id];
+  }
+  // 把 keydown 事件规范化成可比较的字符串（修饰键顺序：Ctrl+Alt+Shift+Meta）
+  function eventToShortcutStr(e) {
+    const mods = [];
+    if (e.ctrlKey) mods.push('Ctrl');
+    if (e.altKey) mods.push('Alt');
+    if (e.shiftKey) mods.push('Shift');
+    if (e.metaKey) mods.push('Meta');
+    let k = e.key;
+    if (k && k.length === 1) k = k.toUpperCase();
+    if (k === ' ') k = 'Space';
+    if (k === 'Escape') k = 'Esc';
+    return mods.length ? mods.join('+') + '+' + k : k;
+  }
+  // 展示用：Delete→Del、Escape→Esc
+  function formatShortcut(str) {
+    if (!str) return '未设置';
+    return String(str).replace(/\bDelete\b/g, 'Del').replace(/\bEscape\b/g, 'Esc');
+  }
+  function shortcutHint(id) {
+    return formatShortcut(getShortcut(id));
+  }
+
+  /* ---------- 撤销历史 ---------- */
   const history = [];
 
   // 快照：排除 iconCache（图标是派生数据，不参与撤销，体积也大）
@@ -211,7 +255,7 @@
       version: 3,
       pages: [{ id: 'p1', name: '主页', rows, cols, cells, layout: { gap: 10 } }],
       activePage: 'p1',
-      settings: { iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false, theme: 'system' },
+      settings: { iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false, theme: 'system', headStyle: 'solid', shortcuts: Object.assign({}, SHORTCUT_DEFAULTS) },
       iconCache: {},
     };
   }
@@ -273,12 +317,15 @@
 
     if (!data.pages.some((p) => p.id === data.activePage)) data.activePage = data.pages[0].id;
 
-    data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false, theme: 'system' }, data.settings || {});
+    data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false, theme: 'system', headStyle: 'solid' }, data.settings || {});
+    // 快捷键：补齐缺失项（新增的快捷键自动用默认值），不覆盖用户已自定义的
+    data.settings.shortcuts = Object.assign({}, SHORTCUT_DEFAULTS, data.settings.shortcuts || {});
     data.iconCache = data.iconCache || {};
     // 图标缓存版本：修复打包版 256px 提取脚本缺失（此前一直落 48px 模糊兜底），清缓存重取
-    if (data.cacheVer !== 6) {
+    // v7：文件夹 / 文件夹快捷方式统一改用文件夹图标，清掉历史缓存让它们重新提取
+    if (data.cacheVer !== 7) {
       data.iconCache = {};
-      data.cacheVer = 6;
+      data.cacheVer = 7;
     }
     return data;
   }
@@ -570,11 +617,12 @@
       '  </div>',
       '  <div class="set-row" data-skey="rest-password">',
       '    <div class="set-label">退出密码<span class="set-desc">mode1 全屏界面提前退出时使用</span></div>',
-      '    <input class="input set-pass" id="st-rest-password" type="' + (ui.restShowPassword ? 'text' : 'password') + '" value="' + String(c.exit_password || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '" autocomplete="off" spellcheck="false">',
-      '  </div>',
-      '  <div class="set-row" data-skey="rest-showpw">',
-      '    <div class="set-label">显示密码<span class="set-desc">勾选后以明文展示退出密码</span></div>',
-      '    <label class="check" title="勾选后以明文展示退出密码"><input type="checkbox" id="st-rest-showpw"' + (ui.restShowPassword ? ' checked' : '') + '></label>',
+      '    <div class="pw-wrap">',
+      '      <input class="input set-pass" id="st-rest-password" type="' + (ui.restShowPassword ? 'text' : 'password') + '" value="' + String(c.exit_password || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '" autocomplete="off" spellcheck="false">',
+      '      <button type="button" class="pw-eye' + (ui.restShowPassword ? ' on' : '') + '" id="st-rest-pw-eye" title="' + (ui.restShowPassword ? '隐藏密码' : '显示密码') + '" aria-label="显示或隐藏密码">',
+      '        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z"/><circle cx="12" cy="12" r="2.6"/></svg>',
+      '      </button>',
+      '    </div>',
       '  </div>',
       '</div>',
     ].join('');
@@ -591,13 +639,19 @@
     { id: 'rest-countdown', tab: 'rest', name: '倒计时时长', desc: '提醒后到进入强制休息的倒计时，单位分钟' },
     { id: 'rest-force', tab: 'rest', name: '强制休息时长', desc: '自绘全屏模式的持续时长；系统锁屏模式忽略此项' },
     { id: 'rest-mode', tab: 'rest', name: '强制休息方式', desc: '模式1：自绘全屏界面；模式2：调用系统锁屏' },
-    { id: 'rest-password', tab: 'rest', name: '退出密码', desc: 'mode1 全屏界面提前退出时使用' },
-    { id: 'rest-showpw', tab: 'rest', name: '显示密码', desc: '勾选后以明文展示退出密码' },
+    { id: 'rest-password', tab: 'rest', name: '退出密码', desc: 'mode1 全屏界面提前退出时使用；输入框右侧眼睛按钮可切换明文' },
     { id: 'app-launch', tab: 'app', name: '启动方式', desc: '点击图标时单击 / 双击启动' },
     { id: 'app-labels', tab: 'app', name: '图标名称', desc: '在图标下方显示名称' },
+    { id: 'app-headstyle', tab: 'app', name: '行列标题样式', desc: '实心纯色框 / 空心线条框 / 仅字体' },
     { id: 'app-undo', tab: 'app', name: '撤销历史上限', desc: '最多保留多少条操作记录，0 = 关闭撤销' },
+    { id: 'sc-delete', tab: 'shortcut', name: '快捷键：删除应用', desc: '删除鼠标悬停的应用（弹确认框，回车确认）' },
+    { id: 'sc-add', tab: 'shortcut', name: '快捷键：添加应用', desc: '在当前格子添加快捷方式' },
+    { id: 'sc-search', tab: 'shortcut', name: '快捷键：打开搜索', desc: '聚焦标题栏搜索框' },
+    { id: 'sc-undo', tab: 'shortcut', name: '快捷键：撤销', desc: '撤销上一步操作' },
+    { id: 'sc-confirm', tab: 'shortcut', name: '快捷键：确认弹窗', desc: '确认当前弹窗的主按钮（系统固定）' },
+    { id: 'sc-cancel', tab: 'shortcut', name: '快捷键：关闭 / 取消', desc: '关闭弹窗、菜单、搜索或退出设置（系统固定）' },
   ];
-  const SETTINGS_TAB_NAME = { general: '通用', rest: '休息', app: '应用' };
+  const SETTINGS_TAB_NAME = { general: '通用', rest: '休息', app: '应用', shortcut: '快捷键' };
 
   // 复用全局搜索的 matchItem：名称 + 描述合并匹配（包含 / 全拼 / 首拼 / 英文首字母 / 子序列模糊）
   function matchSetting(entry, q, compact) {
@@ -635,6 +689,14 @@
       '    <div class="set-label">图标名称<span class="set-desc">在图标下方显示名称</span></div>',
       '    <button class="switch' + (s.showLabels ? ' on' : '') + '" id="st-labels" role="switch" title="显示 / 隐藏图标名称"></button>',
       '  </div>',
+      '  <div class="set-row" data-skey="app-headstyle">',
+      '    <div class="set-label">行列标题样式<span class="set-desc">实心纯色框 / 空心线条框 / 仅字体（颜色应用到文字）</span></div>',
+      '    <div class="seg" id="st-headstyle">',
+      '      <button data-v="solid"' + (s.headStyle !== 'outline' && s.headStyle !== 'text' ? ' class="on"' : '') + '>实心框</button>',
+      '      <button data-v="outline"' + (s.headStyle === 'outline' ? ' class="on"' : '') + '>线条框</button>',
+      '      <button data-v="text"' + (s.headStyle === 'text' ? ' class="on"' : '') + '>仅字体</button>',
+      '    </div>',
+      '  </div>',
       '  <div class="set-row" data-skey="app-undo">',
       '    <div class="set-label">撤销历史上限<span class="set-desc">最多保留多少条操作记录，0 = 关闭撤销</span></div>',
       '    <input class="input set-num" id="st-undo" type="number" min="0" max="1000" value="' + (s.undoLimit || 0) + '">',
@@ -643,14 +705,42 @@
     ].join('');
   }
 
-  // 设置页：三大页（通用 / 休息 / 应用），渲染进宫格区域
+  // 快捷键页：列出所有快捷键，可点击录制新按键（Esc 取消，Backspace 恢复默认）
+  function shortcutTabHtml() {
+    const rows = SHORTCUT_DEFS.map((d) => {
+      const cur = formatShortcut(getShortcut(d.id));
+      const listening = ui.shortcutListening === d.id;
+      const cell = d.id.replace(/^/, 'sc-'); // 用于搜索定位的 data-skey
+      return [
+        '  <div class="set-row sc-row" data-skey="' + cell + '">',
+        '    <div class="set-label">' + d.name + '<span class="set-desc">' + d.desc + '</span></div>',
+        '    <div class="sc-right">',
+        d.fixed
+          ? '<span class="sc-key sc-fixed">' + cur + '</span><span class="sc-tag">系统固定</span>'
+          : '<button class="sc-key' + (listening ? ' listening' : '') + '" data-sc="' + d.id + '">'
+              + (listening ? '请按下按键…' : cur) + '</button>'
+              + '<button class="sc-reset" data-sc-reset="' + d.id + '" title="恢复默认">↺</button>',
+        '    </div>',
+        '  </div>',
+      ].join('');
+    }).join('');
+    return [
+      '<div class="set-group">',
+      '  <div class="set-group-title">应用快捷键</div>',
+      rows,
+      '  <div class="set-row sc-tip"><div class="set-label" style="color:var(--dim-2);font-size:11.5px">点击按键进入录制，按任意组合键保存；<b>Esc</b> 取消，<b>Backspace</b> 恢复默认</div></div>',
+      '</div>',
+    ].join('');
+  }
+
+  // 设置页：三大页（通用 / 休息 / 应用 / 快捷键），渲染进宫格区域
   function renderSettingsPage() {
     stopRestStatusTimer();
     if (!restConfig || typeof restConfig !== 'object') restConfig = Object.assign({}, REST_FALLBACK);
 
     const s = state.settings;
     const tab = ui.settingsTab || 'general';
-    const tabs = [['general', '通用'], ['rest', '休息'], ['app', '应用']];
+    const tabs = [['general', '通用'], ['rest', '休息'], ['app', '应用'], ['shortcut', '快捷键']];
 
     el.grid.style.display = 'block';
     el.grid.innerHTML = [
@@ -665,7 +755,7 @@
       '  </div>',
       '  <div class="settings-search-results" id="st-sres" style="display:none"></div>',
       '  <div class="settings-body" id="st-body">',
-      tab === 'rest' ? restTabHtml() : tab === 'app' ? appTabHtml(s) : generalTabHtml(),
+      tab === 'rest' ? restTabHtml() : tab === 'app' ? appTabHtml(s) : tab === 'shortcut' ? shortcutTabHtml() : generalTabHtml(),
       '  </div>',
       '</div>',
     ].join('');
@@ -840,6 +930,19 @@
       });
     }
 
+    const headSeg = q('#st-headstyle');
+    if (headSeg) {
+      headSeg.addEventListener('click', (e) => {
+        const b = e.target.closest('button[data-v]');
+        if (!b || b.classList.contains('on')) return;
+        pushHistory();
+        state.settings.headStyle = b.dataset.v;
+        scheduleSave();
+        render();
+        toast('行列标题已切换为「' + b.textContent + '」', 'ok');
+      });
+    }
+
     // 撤销上限输入框：宽度跟随内容长度变化（ch 计字符 + 固定 16px 内边距）
     const undoInput = q('#st-undo');
     if (undoInput) {
@@ -861,6 +964,32 @@
         toast('撤销上限已设为 ' + v + ' 条', 'ok');
       });
     }
+
+    /* -------------------------------- 快捷键页 -------------------------------- */
+
+    // 点击按键按钮进入录制；点击恢复默认则直接设为默认值
+    el.grid.querySelectorAll('.sc-key[data-sc]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.sc;
+        ui.shortcutListening = (ui.shortcutListening === id) ? null : id;
+        render();
+        if (ui.shortcutListening === id) {
+          // 录制时把焦点从按钮移开，避免空格触发再次点击
+          btn.blur();
+        }
+      });
+    });
+    el.grid.querySelectorAll('.sc-reset[data-sc-reset]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.scReset;
+        const def = SHORTCUT_DEFAULTS[id];
+        state.settings.shortcuts[id] = def;
+        scheduleSave();
+        ui.shortcutListening = null;
+        toast('已恢复默认：' + formatShortcut(def), 'ok');
+        render();
+      });
+    });
 
     /* -------------------------------- 休息页 -------------------------------- */
 
@@ -945,12 +1074,16 @@
       persistPassword();
     });
 
-    const showPw = q('#st-rest-showpw');
-    showPw.addEventListener('change', () => {
-      ui.restShowPassword = showPw.checked;
-      pwInput.type = showPw.checked ? 'text' : 'password';
-      fitPw();
-    });
+    const eye = q('#st-rest-pw-eye');
+    if (eye) {
+      eye.addEventListener('click', () => {
+        ui.restShowPassword = !ui.restShowPassword;
+        pwInput.type = ui.restShowPassword ? 'text' : 'password';
+        eye.classList.toggle('on', ui.restShowPassword);
+        eye.title = ui.restShowPassword ? '隐藏密码' : '显示密码';
+        fitPw();
+      });
+    }
   }
 
   /* -------------------------------- 全局搜索 -------------------------------- */
@@ -1294,6 +1427,75 @@
       }
     }
     return null;
+  }
+
+  // 按 id 删除应用（所有页面里的同一条目都会移除），用于悬停按 Delete
+  function removeItemById(itemId) {
+    let removed = false;
+    pushHistory();
+    state.pages.forEach((p) => {
+      Object.keys(p.cells || {}).forEach((k) => {
+        const cell = p.cells[k];
+        const items = (cell && cell.items) || [];
+        const idx = items.findIndex((i) => i.id === itemId);
+        if (idx >= 0) {
+          items.splice(idx, 1);
+          if (!items.length) delete p.cells[k];
+          removed = true;
+        }
+      });
+    });
+    if (!removed) history.pop(); // 没删到东西就不留历史
+    return removed;
+  }
+
+  // 悬停应用 + Delete：弹确认框（回车或点「删除」确认）
+  // 文件夹弹窗内删除时，确认后重新打开文件夹（或空了就关闭）；取消也重新打开文件夹
+  function confirmDeleteHovered() {
+    const hover = ui.hoverItem;
+    if (!hover || !hover.itemId) return false;
+    const inFolder = !!ui.folderDialogKey;
+    const key = hover.cellKey || findCellKeyOfItem(hover.itemId);
+    const cell = key ? cellOf(key, false) : null;
+    const item = cell && (cell.items || []).find((i) => i.id === hover.itemId);
+    if (!item) return false;
+    const name = String(item.name || '未命名').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    const reopenOrClose = () => {
+      const c = cellOf(key, false);
+      if (c && (c.items || []).length) openFolder(key);
+      else closeDialog();
+    };
+
+    if (inFolder) {
+      // 文件夹内：取消也要回到文件夹视图，不能直接关掉
+      openDialog({
+        title: '删除应用？',
+        body: '<div class="hintline" style="color:var(--text);font-size:13px;margin:2px 0 4px">确定删除「' + name + '」？删除后可用 ' + shortcutHint('undo') + ' 撤销。</div>',
+        buttons: [
+          { label: '取消', ghost: true, onClick: () => { openFolder(key); return false; } },
+          { label: '删除', danger: true, onClick: () => {
+            if (removeItemById(item.id)) {
+              scheduleSave();
+              render();
+              toast('已删除「' + (item.name || '未命名') + '」', 'ok');
+            }
+            reopenOrClose();
+            return false;
+          } },
+        ],
+      });
+      return true;
+    }
+
+    confirmDialog('删除应用？', '确定删除「' + name + '」？删除后可用 ' + shortcutHint('undo') + ' 撤销。', '删除', () => {
+      if (removeItemById(item.id)) {
+        scheduleSave();
+        render();
+        toast('已删除「' + (item.name || '未命名') + '」', 'ok');
+      }
+    });
+    return true;
   }
 
   function handleIconTap(item) {
@@ -1707,6 +1909,34 @@
     render();
   }
 
+  // 行列转置：行 ↔ 列互换，行列标题与单元格一起变换（类似 Excel 的转置）
+  function transposePage() {
+    const page = curPage();
+    if (!page.rows.length || !page.cols.length) {
+      toast('当前页没有行列可转置', 'err');
+      return;
+    }
+    pushHistory();
+    const oldRows = page.rows.slice();
+    const oldCols = page.cols.slice();
+    // 原列 → 新行（高度沿用原列宽）；原行 → 新列（宽度沿用原行高）
+    page.rows = oldCols.map((c) => ({ id: c.id, name: c.name, color: c.color, height: c.width || 150 }));
+    page.cols = oldRows.map((r) => ({ id: r.id, name: r.name, color: r.color, width: r.height || 150 }));
+    // 单元格 key 是「行id|列id」，转置后交换两段
+    const cells = {};
+    Object.keys(page.cells || {}).forEach((k) => {
+      const parts = k.split('|');
+      if (parts.length !== 2) return;
+      cells[parts[1] + '|' + parts[0]] = page.cells[k];
+    });
+    page.cells = cells;
+    ui.activeCell = null;
+    ui.hoverItem = null;
+    scheduleSave();
+    render();
+    toast('已转置：行 ↔ 列，可用 ' + shortcutHint('undo') + ' 撤销', 'ok');
+  }
+
   function removeRow(id) {
     const page = curPage();
     const idx = page.rows.findIndex((r) => r.id === id);
@@ -1936,6 +2166,12 @@
       const label = document.createElement('span');
       label.textContent = entry.label;
       item.appendChild(label);
+      if (entry.hint) {
+        const hint = document.createElement('span');
+        hint.className = 'menu-hint';
+        hint.textContent = entry.hint;
+        item.appendChild(hint);
+      }
       if (entry.sub) {
         const sub = document.createElement('span');
         sub.className = 'sub';
@@ -1995,6 +2231,7 @@
       {
         label: '从这个格子移除',
         danger: true,
+        hint: shortcutHint('delete'),
         action: () => {
           const idx = cell.items.findIndex((i) => i.id === itemId);
           if (idx >= 0) cell.items.splice(idx, 1);
@@ -2115,6 +2352,9 @@
     el.dialogTitle.ondblclick = null;
     el.dialogBody.innerHTML = '';
     el.dialogFoot.innerHTML = '';
+    ui.folderDialogKey = null;
+    ui.hoverItem = null;
+    ui.shortcutListening = null;
   }
 
   function bindColorPair(hexId, pickerId) {
@@ -2513,6 +2753,8 @@
         lb.textContent = item.name || '';
         node.appendChild(lb);
 
+        node.addEventListener('pointerover', () => { ui.hoverItem = { itemId: item.id, cellKey: key }; });
+        node.addEventListener('pointerleave', () => { if (ui.hoverItem && ui.hoverItem.itemId === item.id) ui.hoverItem = null; });
         node.addEventListener('pointerdown', (e) => startPopupDrag(e, item, node, grid));
         node.addEventListener('contextmenu', (e) => {
           e.preventDefault();
@@ -2522,7 +2764,7 @@
             item.target && isLocalTarget(item.target)
               ? { label: '在资源管理器中显示', action: () => api.reveal(item.target) }
               : { sep: true },
-            { label: '删除', danger: true, action: () => {
+            { label: '删除', danger: true, hint: shortcutHint('delete'), action: () => {
               const cur2 = cellOf(key, false);
               if (!cur2) return;
               cur2.items = cur2.items.filter((i) => i.id !== item.id);
@@ -2548,6 +2790,8 @@
         { label: '关闭', primary: true },
       ],
     });
+    ui.folderDialogKey = key;
+    ui.hoverItem = null;
     el.dialogTitle.classList.add('editable-title');
     el.dialogTitle.title = '双击修改文件夹名称与样式';
     el.dialogTitle.ondblclick = () => { closeDialog(); openCellDialog(key); };
@@ -2686,6 +2930,25 @@
       const head = e.target.closest('[data-axis]');
       if (!head) return;
       openHeaderDialog(head.dataset.axis, head.dataset.id);
+    });
+
+    // 记录鼠标当前悬停的图标（供 Delete 键删除）
+    el.grid.addEventListener('pointerover', (e) => {
+      const iconNode = e.target.closest('.icon');
+      if (!iconNode) return;
+      const cellNode = iconNode.closest('.cell');
+      ui.hoverItem = {
+        itemId: iconNode.dataset.item || '',
+        cellKey: cellNode ? cellNode.dataset.key : null,
+      };
+    });
+    el.grid.addEventListener('pointerleave', () => { ui.hoverItem = null; });
+
+    // 左上角「行列转置」按钮（搜索页为只读合成页，不参与）
+    el.grid.addEventListener('click', (e) => {
+      if (!e.target.closest('.corner-transpose')) return;
+      if (ui.searchPage || !el.overlay.classList.contains('hidden')) return;
+      transposePage();
     });
 
     el.grid.addEventListener('pointerdown', (e) => {
@@ -2842,20 +3105,65 @@
     $('dialog-x').addEventListener('click', closeDialog);
 
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
+      const str = eventToShortcutStr(e);
+      const shortcuts = getShortcuts();
+      const typing = (() => {
+        const ae = document.activeElement;
+        return !!(ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT' || ae.isContentEditable));
+      })();
+
+      // 正在录制快捷键：捕获下一次按键
+      if (ui.shortcutListening) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === 'Escape') {
+          ui.shortcutListening = null;
+          render();
+          return;
+        }
+        if (e.key === 'Backspace') {
+          // 退格恢复默认
+          const id = ui.shortcutListening;
+          const def = SHORTCUT_DEFAULTS[id];
+          state.settings.shortcuts[id] = def;
+          scheduleSave();
+          ui.shortcutListening = null;
+          toast('已恢复默认：' + formatShortcut(def), 'ok');
+          render();
+          return;
+        }
+        // 单独按修饰键不录制
+        if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
+        const id = ui.shortcutListening;
+        // 检查是否与其它快捷键冲突（包括系统固定的 Enter / Esc）
+        const conflict = Object.keys(shortcuts).find((k) => k !== id && shortcuts[k] === str);
+        if (conflict) {
+          const cdef = SHORTCUT_DEFS.find((d) => d.id === conflict);
+          toast('该按键已被「' + (cdef ? cdef.name : conflict) + '」占用', 'err');
+          return;
+        }
+        state.settings.shortcuts[id] = str;
+        scheduleSave();
+        ui.shortcutListening = null;
+        toast('已设置为 ' + formatShortcut(str), 'ok');
+        render();
+        return;
+      }
+
+      // 关闭 / 取消（Esc）：全局生效
+      if (str === shortcuts.cancel) {
         closeMenu();
         if (!el.overlay.classList.contains('hidden')) closeDialog();
-        // 设置页：Esc 返回宫格
         if (ui.settingsOpen) closeSettings();
-        // 搜索框内 Esc 或正处于搜索结果页：清空并退出搜索
         if (document.activeElement === search || ui.searchPage) {
           toggleSearch(false);
           search.blur();
         }
+        return;
       }
-      // 回车确认弹窗：点第一个非「取消」按钮（添加 / 保存 / 确定等）
-      if (e.key === 'Enter' && !e.isComposing && !el.overlay.classList.contains('hidden')) {
-        // 焦点已经在弹窗底部按钮上时交给原生点击，避免触发两次
+
+      // 确认弹窗（Enter）：仅在弹窗打开时
+      if (str === shortcuts.confirm && !el.overlay.classList.contains('hidden') && !e.isComposing) {
         const ae = document.activeElement;
         if (ae && ae.tagName === 'BUTTON' && el.dialogFoot.contains(ae)) return;
         const btn = Array.from(el.dialogFoot.querySelectorAll('.btn')).find((b) => !b.classList.contains('ghost'));
@@ -2865,22 +3173,39 @@
         }
         return;
       }
-      if (e.key === '/' && document.activeElement !== search && el.overlay.classList.contains('hidden') && !ui.settingsOpen) {
-        e.preventDefault();
-        toggleSearch(true);
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
-        if (el.overlay.classList.contains('hidden')) {
-          e.preventDefault();
-          if (ui.settingsOpen) return;
-          if (ui.searchPage) { toast('搜索结果页不能添加图标，按 Esc 退出搜索后再试', 'err'); return; }
-          openItemDialog(ui.activeCell || firstCellKey(), null);
+
+      // 以下为可配置的应用级快捷键：输入框内不拦截（交给原生编辑）
+      if (typing) return;
+
+      // 删除悬停的应用（宫格 / 文件夹弹窗内均可）
+      if (str === shortcuts.delete && !ui.settingsOpen && !ui.searchPage) {
+        const overlayHidden = el.overlay.classList.contains('hidden');
+        if (overlayHidden || ui.folderDialogKey !== null) {
+          if (confirmDeleteHovered()) e.preventDefault();
+          return;
         }
       }
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey && e.altKey) return; // 留給系統
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+
+      // 打开搜索
+      if (str === shortcuts.search && document.activeElement !== search && el.overlay.classList.contains('hidden') && !ui.settingsOpen) {
+        e.preventDefault();
+        toggleSearch(true);
+        return;
+      }
+
+      // 添加应用
+      if (str === shortcuts.add && el.overlay.classList.contains('hidden') && !ui.settingsOpen) {
+        e.preventDefault();
+        if (ui.searchPage) { toast('搜索结果页不能添加图标，按 Esc 退出搜索后再试', 'err'); return; }
+        openItemDialog(ui.activeCell || firstCellKey(), null);
+        return;
+      }
+
+      // 撤销（Ctrl+Alt+Z / Ctrl+Shift+Z 留给系统）
+      if (str === shortcuts.undo && !e.shiftKey && !e.altKey) {
         e.preventDefault();
         undo();
+        return;
       }
     });
   }

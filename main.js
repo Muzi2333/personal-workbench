@@ -312,8 +312,9 @@ async function launchTarget({ target, args, cwd } = {}) {
 
   const exists = fs.existsSync(raw);
 
-  // 非 URL 的本地路径不存在：明确返回 NOT_FOUND 让上层决定是否弹提示
-  if (!isURI && !exists) {
+  // 本地路径不存在：明确返回 NOT_FOUND 让上层决定是否弹提示
+  // （URL 在上面 scheme 分支已经 return，能走到这儿的全是本地路径）
+  if (!exists) {
     return { ok: false, code: 'NOT_FOUND', error: '找不到目标文件', target: raw };
   }
 
@@ -428,6 +429,16 @@ function extractIconHD(iconSource) {
   });
 }
 
+// 文件夹兜底图标（系统图标取不到时使用），保证文件夹 / 文件夹快捷方式有默认文件夹图标
+const FOLDER_ICON = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+  + '<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">'
+  + '<stop offset="0" stop-color="#ffd66b"/><stop offset="1" stop-color="#f0ac16"/></linearGradient></defs>'
+  + '<path d="M6 18a4 4 0 0 1 4-4h14l5 6h25a4 4 0 0 1 4 4v24a4 4 0 0 1-4 4H10a4 4 0 0 1-4-4z" fill="#dfa019"/>'
+  + '<path d="M6 25h52v21a4 4 0 0 1-4 4H10a4 4 0 0 1-4-4z" fill="url(#g)"/>'
+  + '</svg>'
+);
+
 ipcMain.handle('target:icon', async (_e, filePath) => {
   try {
     if (!filePath) return null;
@@ -441,6 +452,14 @@ ipcMain.handle('target:icon', async (_e, filePath) => {
       } catch (_) {}
     }
     if (!fs.existsSync(iconSource)) return null;
+    // 文件夹（包括指向文件夹的快捷方式）：不管 SHDefExtractIcon 能否提取，统一给文件夹图标
+    let isDir = false;
+    try { isDir = fs.statSync(iconSource).isDirectory(); } catch (_) {}
+    if (isDir) {
+      const img = await app.getFileIcon(iconSource, { size: 'large' });
+      if (img && !img.isEmpty()) return img.toDataURL();
+      return FOLDER_ICON;
+    }
     const hd = await extractIconHD(iconSource);
     if (hd) return hd;
     const img = await app.getFileIcon(iconSource, { size: 'large' });

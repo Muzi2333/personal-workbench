@@ -152,12 +152,28 @@
     container.style.gridTemplateColumns = hideHeads ? colTpl : `var(--head-w) ${colTpl}`;
     container.style.gridTemplateRows = hideHeads ? rowTpl : `var(--head-h) ${rowTpl}`;
 
-    // 左上角
+    // 行列标题样式：solid（实心底色）/ outline（空心线条框）/ text（仅字体着色）
+    const headStyle = (state && state.settings && state.settings.headStyle) || 'solid';
+    container.classList.toggle('head-outline', headStyle === 'outline');
+    container.classList.toggle('head-text', headStyle === 'text');
+
+    // 左上角（行列标题交叉处）：内置「行列转置」按钮
     if (!hideHeads) {
       const corner = document.createElement('div');
       corner.className = 'corner';
       corner.style.gridColumn = '1';
       corner.style.gridRow = '1';
+      const tr = document.createElement('button');
+      tr.type = 'button';
+      tr.className = 'corner-transpose';
+      tr.title = '行列转置（交换行与列，像 Excel 转置）';
+      tr.setAttribute('aria-label', '行列转置');
+      tr.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">'
+        + '<rect x="1.8" y="1.8" width="12.4" height="12.4" rx="1.6"/>'
+        + '<path d="M1.8 5.9h12.4M5.9 1.8v12.4"/>'
+        + '<path d="M6.4 10.2l3.9-3.9M10.3 8v-1.7h-1.7"/>'
+        + '</svg>';
+      corner.appendChild(tr);
       container.appendChild(corner);
     }
 
@@ -170,8 +186,11 @@
       h.style.gridColumn = String(i + 2);
       h.style.gridRow = '1';
       const bg = col.color || '#5b6b7c';
-      h.style.background = bg;
-      h.style.color = contrastColor(bg);
+      h.style.setProperty('--head-color', bg);
+      if (headStyle === 'solid') {
+        h.style.background = bg;
+        h.style.color = contrastColor(bg);
+      }
 
       const name = document.createElement('span');
       name.className = 'hname';
@@ -191,8 +210,11 @@
         rh.style.gridColumn = '1';
         rh.style.gridRow = String(j + 2);
         const bg = row.color || '#5b6b7c';
-        rh.style.background = bg;
-        rh.style.color = contrastColor(bg);
+        rh.style.setProperty('--head-color', bg);
+        if (headStyle === 'solid') {
+          rh.style.background = bg;
+          rh.style.color = contrastColor(bg);
+        }
 
         const name = document.createElement('span');
         name.className = 'hname';

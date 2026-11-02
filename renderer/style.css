@@ -17,6 +17,22 @@
   --icon-size: 54px;
   --gap: 10px;
   --radius: 12px;
+  /* 半透明覆盖色（深色模式以白色为基色、浅色模式以黑色为基色） */
+  --ov-2: rgba(255, 255, 255, 0.018);
+  --ov-3: rgba(255, 255, 255, 0.03);
+  --ov-4: rgba(255, 255, 255, 0.04);
+  --ov-5: rgba(255, 255, 255, 0.05);
+  --ov-6: rgba(255, 255, 255, 0.06);
+  --ov-7: rgba(255, 255, 255, 0.07);
+  --ov-8: rgba(255, 255, 255, 0.08);
+  --ov-9: rgba(255, 255, 255, 0.09);
+  --ov-10: rgba(255, 255, 255, 0.10);
+  --ov-12: rgba(255, 255, 255, 0.12);
+  --ov-14: rgba(255, 255, 255, 0.14);
+  --ov-35: rgba(255, 255, 255, 0.035);
+  --ov-45: rgba(255, 255, 255, 0.045);
+  --ov-55: rgba(255, 255, 255, 0.055);
+  --ov-75: rgba(255, 255, 255, 0.075);
 }
 
 html[data-theme="light"] {
@@ -33,6 +49,22 @@ html[data-theme="light"] {
   --accent: #2563eb;
   --accent-soft: rgba(37, 99, 235, 0.14);
   --danger: #dc2626;
+  /* 浅色模式：所有半透明覆盖色换成黑色基色 */
+  --ov-2: rgba(0, 0, 0, 0.018);
+  --ov-3: rgba(0, 0, 0, 0.03);
+  --ov-4: rgba(0, 0, 0, 0.04);
+  --ov-5: rgba(0, 0, 0, 0.05);
+  --ov-6: rgba(0, 0, 0, 0.06);
+  --ov-7: rgba(0, 0, 0, 0.07);
+  --ov-8: rgba(0, 0, 0, 0.08);
+  --ov-9: rgba(0, 0, 0, 0.09);
+  --ov-10: rgba(0, 0, 0, 0.10);
+  --ov-12: rgba(0, 0, 0, 0.12);
+  --ov-14: rgba(0, 0, 0, 0.14);
+  --ov-35: rgba(0, 0, 0, 0.035);
+  --ov-45: rgba(0, 0, 0, 0.045);
+  --ov-55: rgba(0, 0, 0, 0.055);
+  --ov-75: rgba(0, 0, 0, 0.075);
 }
 
 html[data-theme="light"] body {
@@ -84,7 +116,7 @@ body {
 .tb-sep {
   width: 1px;
   height: 16px;
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--ov-12);
   margin: 0 2px;
   flex: 0 0 auto;
 }
@@ -100,7 +132,7 @@ body {
   cursor: pointer;
   transition: background 0.12s, color 0.12s;
 }
-.tb-btn:hover { background: rgba(255, 255, 255, 0.07); color: #fff; }
+.tb-btn:hover { background: var(--ov-7); color: #fff; }
 .tb-btn.close:hover { background: #c42b1c; color: #fff; }
 
 /* 标题栏居中：休息提醒状态（纯展示，不拦截拖拽） */
@@ -143,8 +175,8 @@ body {
 }
 .settings-title { font-size: 16px; font-weight: 600; }
 .set-group {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--ov-3);
+  border: 1px solid var(--ov-6);
   border-radius: 12px;
   padding: 4px 14px;
   margin-bottom: 12px;
@@ -161,7 +193,7 @@ body {
   gap: 16px;
   padding: 10px 0;
 }
-.set-row + .set-row { border-top: 1px solid rgba(255, 255, 255, 0.05); }
+.set-row + .set-row { border-top: 1px solid var(--ov-5); }
 .set-row.btns { justify-content: flex-start; gap: 10px; flex-wrap: wrap; }
 .set-label { font-size: 13px; color: var(--text); flex: 1 1 auto; min-width: 0; }
 .set-desc { display: block; font-size: 11.5px; color: var(--dim-2); margin-top: 2px; }
@@ -171,6 +203,25 @@ body {
 .set-num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 /* 设置页退出密码输入框：宽度由 JS 按内容长度设置（同撤销上限），.input 的 width:100% 在后面会覆盖类样式 */
 .set-pass { flex: 0 0 auto; letter-spacing: 1px; }
+
+/* 密码输入框 + 眼睛按钮（替代原来的「显示密码」勾选项） */
+.pw-wrap { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.pw-eye {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-elev);
+  color: var(--dim);
+  cursor: pointer;
+  transition: color 0.14s, border-color 0.14s, background 0.14s;
+}
+.pw-eye:hover { color: var(--text); border-color: var(--accent); }
+.pw-eye.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 
 .set-select {
   flex: 0 0 auto;
@@ -196,8 +247,8 @@ body {
   margin: 0 0 14px;
 }
 .set-tabs button {
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--ov-7);
+  background: var(--ov-4);
   color: var(--dim);
   font: inherit;
   font-size: 12.5px;
@@ -206,7 +257,7 @@ body {
   cursor: pointer;
   transition: background 0.14s, color 0.14s, border-color 0.14s;
 }
-.set-tabs button:hover { background: rgba(255, 255, 255, 0.09); color: var(--text); }
+.set-tabs button:hover { background: var(--ov-9); color: var(--text); }
 .set-tabs button.on {
   background: var(--accent-soft);
   border-color: rgba(76, 141, 255, 0.45);
@@ -218,8 +269,8 @@ body {
   margin: 8px 0 6px;
   padding: 12px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--ov-4);
+  border: 1px solid var(--ov-6);
 }
 .rest-status-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .rest-status-mode { margin-left: auto; font-size: 11.5px; color: var(--dim-2); }
@@ -228,7 +279,7 @@ body {
   height: 8px;
   border-radius: 50%;
   background: #6f767c;
-  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.04);
+  box-shadow: 0 0 0 3px var(--ov-4);
 }
 .rest-dot.state-working { background: #4fc08d; box-shadow: 0 0 0 3px rgba(79, 192, 141, 0.16); }
 .rest-dot.state-reminding { background: #e3b341; box-shadow: 0 0 0 3px rgba(227, 179, 65, 0.16); }
@@ -260,12 +311,12 @@ body {
 
 /* 设置项搜索结果列表 */
 .st-hit { cursor: pointer; border-radius: 8px; }
-.st-hit:hover { background: rgba(255, 255, 255, 0.05); }
+.st-hit:hover { background: var(--ov-5); }
 .st-hit-tab {
   flex: 0 0 auto;
   font-size: 11px;
   color: var(--dim-2);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--ov-10);
   border-radius: 6px;
   padding: 2px 8px;
 }
@@ -297,8 +348,8 @@ body {
 /* 分段选择器（启动方式） */
 .seg {
   display: flex;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--ov-5);
+  border: 1px solid var(--ov-8);
   border-radius: 8px;
   padding: 2px;
   flex: 0 0 auto;
@@ -320,8 +371,8 @@ body {
   width: 40px;
   height: 22px;
   border-radius: 11px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--ov-12);
+  background: var(--ov-8);
   position: relative;
   cursor: pointer;
   flex: 0 0 auto;
@@ -367,7 +418,7 @@ body {
   flex-direction: column;
   gap: 6px;
   padding: 8px 10px 12px 12px;
-  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  border-right: 1px solid var(--ov-5);
   overflow-y: auto;
   scrollbar-width: thin;
 }
@@ -390,7 +441,7 @@ body {
   justify-content: flex-start;
   padding-top: 8px;
   margin-top: 6px;
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-top: 1px solid var(--ov-5);
 }
 .sidebar-foot .tb-btn.active {
   background: rgba(91, 157, 255, 0.18);
@@ -411,7 +462,7 @@ body {
   cursor: pointer;
   transition: background 0.14s, color 0.14s;
 }
-.page-item:hover { background: rgba(255, 255, 255, 0.05); color: var(--text); }
+.page-item:hover { background: var(--ov-5); color: var(--text); }
 .page-item.active { background: rgba(91, 157, 255, 0.16); color: #cfe1ff; }
 .page-item.is-dragging { opacity: 0.35; }
 .page-item.drop-hover { background: rgba(91, 157, 255, 0.28); color: #fff; outline: 1px solid var(--accent); }
@@ -439,11 +490,11 @@ body {
   height: 32px;
   padding: 0 10px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.045);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--ov-45);
+  border: 1px solid var(--ov-6);
   transition: border-color 0.15s, background 0.15s;
 }
-.search:focus-within { border-color: rgba(76, 141, 255, 0.55); background: rgba(255, 255, 255, 0.07); }
+.search:focus-within { border-color: rgba(76, 141, 255, 0.55); background: var(--ov-7); }
 .search-ico { color: var(--dim-2); flex: 0 0 auto; }
 
 .search input {
@@ -473,15 +524,15 @@ body {
   height: 32px;
   padding: 0 12px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.055);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: var(--ov-55);
+  border: 1px solid var(--ov-7);
   color: #dfe2e4;
   font: inherit;
   font-size: 12.5px;
   cursor: pointer;
   transition: background 0.14s, border-color 0.14s, transform 0.08s;
 }
-.btn:hover { background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.14); }
+.btn:hover { background: var(--ov-10); border-color: var(--ov-14); }
 .btn:active { transform: scale(0.97); }
 .btn.icon-btn { width: 32px; padding: 0; font-size: 16px; line-height: 1; }
 
@@ -493,8 +544,8 @@ body {
   height: 32px;
   padding: 0 10px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: var(--ov-35);
+  border: 1px solid var(--ov-5);
   color: var(--dim);
   font-size: 12px;
 }
@@ -509,7 +560,7 @@ body {
   border-radius: 5px;
   background: #121315;
   color: #cfd4d7;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--ov-8);
   font-size: 11.5px;
   line-height: 1;
   font-variant-numeric: tabular-nums;
@@ -573,7 +624,33 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 
 /* 表头 */
 
-.corner { position: sticky; top: 0; left: 0; z-index: 5; background: transparent; }
+.corner {
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 5;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 左上角行列转置按钮 */
+.corner-transpose {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim-2);
+  cursor: pointer;
+  transition: color 0.14s, background 0.14s, border-color 0.14s;
+}
+.corner-transpose:hover { color: var(--text); background: var(--ov-8); border-color: var(--ov-10); }
+.corner-transpose:active { background: var(--ov-12); }
 
 .col-head {
   position: sticky;
@@ -613,6 +690,22 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   transition: filter 0.14s;
 }
 .row-head:hover { filter: brightness(1.12); }
+
+/* 行列标题样式：空心线条框 / 仅字体（标记颜色应用到文字，不要背景框） */
+.head-outline .col-head,
+.head-outline .row-head {
+  background: transparent;
+  border: 1px solid var(--head-color, var(--line));
+}
+.head-text .col-head,
+.head-text .row-head {
+  background: transparent;
+  border: 1px solid transparent;
+}
+/* 实心模式下表头文字跟随自动对比色，避免浅色底看不清 */
+.col-head .hname,
+.row-head .hname { color: inherit; }
+.head-text .hname { color: var(--head-color, var(--text)); }
 
 .row-head .hname { writing-mode: vertical-rl; text-orientation: mixed; letter-spacing: 2px; }
 
@@ -688,7 +781,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 }
 
 .cell.is-empty {
-  background: rgba(255, 255, 255, 0.018);
+  background: var(--ov-2);
   border: 1px dashed #303335;
   cursor: pointer;
 }
@@ -712,7 +805,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   cursor: pointer;
   transition: background 0.14s, transform 0.14s, opacity 0.14s;
 }
-.icon:hover { background: rgba(255, 255, 255, 0.055); }
+.icon:hover { background: var(--ov-55); }
 .icon:active { transform: scale(0.96); }
 .icon.is-dragging { opacity: 0.35; }
 
@@ -757,7 +850,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   position: relative;
   transition: background 0.14s, transform 0.14s;
 }
-.folder:hover { background: rgba(255, 255, 255, 0.055); }
+.folder:hover { background: var(--ov-55); }
 .folder:active { transform: scale(0.96); }
 .folder.is-dragging { opacity: 0.35; }
 
@@ -770,11 +863,11 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   gap: 3px;
   padding: 4px;
   border-radius: calc(var(--icon-size) * 0.26);
-  background: rgba(255, 255, 255, 0.07);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--ov-7);
+  border: 1px solid var(--ov-6);
 }
 .mini { display: grid; place-items: center; overflow: hidden; border-radius: 6px; }
-.mini.blank { background: rgba(255, 255, 255, 0.035); }
+.mini.blank { background: var(--ov-35); }
 .mini .tile {
   width: 100%;
   height: 100%;
@@ -793,7 +886,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   padding: 0 5px;
   border-radius: 9px;
   background: rgba(20, 21, 22, 0.85);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--ov-12);
   color: #e8eaeb;
   font-size: 10.5px;
   line-height: 16px;
@@ -845,7 +938,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   flex-direction: column;
   border-radius: 14px;
   background: var(--panel);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--ov-8);
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
   overflow: hidden;
 }
@@ -866,14 +959,14 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   margin: -2px -6px;
   transition: background 0.14s;
 }
-.dialog-head .editable-title:hover { background: rgba(255, 255, 255, 0.08); }
+.dialog-head .editable-title:hover { background: var(--ov-8); }
 .dialog-x {
   width: 26px; height: 26px;
   border: 0; border-radius: 6px;
   background: transparent; color: var(--dim);
   cursor: pointer; font-size: 13px;
 }
-.dialog-x:hover { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+.dialog-x:hover { background: var(--ov-8); color: var(--text); }
 
 .dialog-body {
   padding: 4px 18px 8px 18px;
@@ -902,11 +995,11 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   width: 44px; height: 44px;
   border-radius: 10px;
   object-fit: contain;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--ov-4);
 }
 .about-name { font-size: 15px; font-weight: 600; }
 .about-desc { margin-top: 3px; font-size: 11.5px; color: var(--dim-2); }
-.about-rows { border-top: 1px solid rgba(255, 255, 255, 0.06); padding-top: 6px; }
+.about-rows { border-top: 1px solid var(--ov-6); padding-top: 6px; }
 .about-row {
   display: flex;
   align-items: baseline;
@@ -939,8 +1032,8 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   height: 32px;
   padding: 0 10px;
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--ov-5);
+  border: 1px solid var(--ov-8);
   color: var(--text);
   font: inherit;
   font-size: 12.5px;
@@ -948,7 +1041,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   user-select: text;
   transition: border-color 0.15s, background 0.15s;
 }
-.input:focus { border-color: rgba(76, 141, 255, 0.6); background: rgba(255, 255, 255, 0.075); }
+.input:focus { border-color: rgba(76, 141, 255, 0.6); background: var(--ov-75); }
 .input::placeholder { color: var(--dim-2); }
 
 .row-2 { display: flex; gap: 10px; }
@@ -957,7 +1050,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .color-field { display: flex; align-items: center; gap: 8px; }
 .color-field input[type="color"] {
   width: 34px; height: 32px; padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--ov-10);
   border-radius: 7px; background: transparent; cursor: pointer;
 }
 .color-field .input { flex: 1; }
@@ -965,11 +1058,11 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
 .emoji-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .emoji-row button {
   width: 28px; height: 28px;
-  border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.07);
-  background: rgba(255, 255, 255, 0.045);
+  border-radius: 6px; border: 1px solid var(--ov-7);
+  background: var(--ov-45);
   font-size: 14px; line-height: 1; cursor: pointer;
 }
-.emoji-row button:hover { background: rgba(255, 255, 255, 0.12); }
+.emoji-row button:hover { background: var(--ov-12); }
 
 .hintline { color: var(--dim-2); font-size: 11.5px; margin-top: 6px; line-height: 1.5; }
 
@@ -982,7 +1075,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   padding: 6px;
   border-radius: 10px;
   background: #2a2c2e;
-  border: 1px solid rgba(255, 255, 255, 0.09);
+  border: 1px solid var(--ov-9);
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
   animation: menuIn 0.12s ease-out;
 }
@@ -999,10 +1092,11 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   font-size: 12.5px;
   cursor: pointer;
 }
-.menu-item:hover { background: rgba(255, 255, 255, 0.08); }
+.menu-item:hover { background: var(--ov-8); }
 .menu-item.danger { color: var(--danger); }
 .menu-item .sub { margin-left: auto; color: var(--dim-2); font-size: 11px; }
-.menu-sep { height: 1px; margin: 5px 6px; background: rgba(255, 255, 255, 0.07); }
+.menu-item .menu-hint { margin-left: auto; color: var(--dim-2); font-size: 11px; font-variant-numeric: tabular-nums; letter-spacing: 0.3px; }
+.menu-sep { height: 1px; margin: 5px 6px; background: var(--ov-7); }
 
 /* 浮动拖拽影子 */
 /* 注意：必须用独立类名 drag-ghost，不能叫 ghost——会与 .btn.ghost（幽灵按钮）冲突，
@@ -1051,7 +1145,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   padding: 10px 16px;
   border-radius: 10px;
   background: rgba(38, 40, 42, 0.96);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--ov-10);
   color: #e6e8ea;
   font-size: 12.5px;
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
@@ -1078,3 +1172,64 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   text-align: center;
   color: var(--dim-2);
 }
+
+/* --------------------------- 快捷键设置页 --------------------------- */
+
+.sc-row .sc-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.sc-key {
+  min-width: 108px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: border-color 0.14s, background 0.14s;
+}
+.sc-key:hover { border-color: var(--accent); }
+.sc-key.sc-fixed {
+  cursor: default;
+  color: var(--dim-2);
+  background: var(--ov-4);
+}
+.sc-key.listening {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  animation: scPulse 1s ease-in-out infinite;
+}
+@keyframes scPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(76, 141, 255, 0.45); }
+  50% { box-shadow: 0 0 0 4px rgba(76, 141, 255, 0); }
+}
+.sc-reset {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  color: var(--dim);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition: color 0.14s, border-color 0.14s;
+}
+.sc-reset:hover { color: var(--accent); border-color: var(--accent); }
+.sc-tag {
+  font-size: 11px;
+  color: var(--dim-2);
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: var(--ov-6);
+  border: 1px solid var(--ov-8);
+}
+.sc-tip { padding-bottom: 4px; }
