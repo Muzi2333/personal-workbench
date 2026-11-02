@@ -2024,20 +2024,38 @@
     // 工具栏：图标大小（行高列宽按基准 54px↔80×80 等比联动）
     const size = $('icon-size');
     size.value = String(state.settings.iconSize || 54);
-    size.addEventListener('pointerdown', () => pushHistory()); // 一次拖动只记一条历史
-    size.addEventListener('input', () => {
-      const v = Number(size.value);
+
+    // 应用图标大小：滑块和 Ctrl+滚轮共用
+    function applyIconSize(raw) {
+      const v = Math.min(76, Math.max(36, Math.round(raw)));
       state.settings.iconSize = v;
+      if (String(size.value) !== String(v)) size.value = String(v);
       el.grid.style.setProperty('--icon-size', v + 'px');
-      const rowH = Math.max(40, Math.round(80 * v / 54));
-      const colW = Math.max(40, Math.round(80 * v / 54));
+      const side = Math.max(40, Math.round(80 * v / 54));
       state.pages.forEach((p) => {
-        p.rows.forEach((r) => { r.height = rowH; });
-        p.cols.forEach((c) => { c.width = colW; });
+        p.rows.forEach((r) => { r.height = side; });
+        p.cols.forEach((c) => { c.width = side; });
       });
       scheduleSave();
       render();
-    });
+    }
+
+    size.addEventListener('pointerdown', () => pushHistory()); // 一次拖动只记一条历史
+    size.addEventListener('input', () => applyIconSize(Number(size.value)));
+
+    // Ctrl + 滚轮调节图标大小（一次连续滚动只记一条撤销历史）
+    let wheelHistoryOpen = false;
+    let wheelEndTimer = null;
+    el.canvas.addEventListener('wheel', (e) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault(); // 阻止 Chromium 缩放整个界面
+      if (!wheelHistoryOpen) { pushHistory(); wheelHistoryOpen = true; }
+      clearTimeout(wheelEndTimer);
+      wheelEndTimer = setTimeout(() => { wheelHistoryOpen = false; }, 500);
+      // deltaY 向下滚为放大 / 向上滚为缩小（2px 一档，与滑块一致）
+      const step = e.deltaY < 0 ? 2 : -2;
+      applyIconSize((Number(state.settings.iconSize) || 54) + step);
+    }, { passive: false });
 
     // 锁定布局：禁止拖动图标
     $('btn-lock').addEventListener('click', toggleLock);
