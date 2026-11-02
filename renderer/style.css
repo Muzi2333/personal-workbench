@@ -520,7 +520,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 3px;
   padding: 6px 4px;
   border-radius: 10px;
   cursor: pointer;
@@ -563,7 +563,7 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 3px;
   padding: 6px 4px;
   border-radius: 10px;
   cursor: pointer;
