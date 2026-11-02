@@ -53,6 +53,14 @@
     return /^#[0-9a-f]{3,8}$/i.test(s) ? s : '';
   }
 
+  // 是否是本地路径（用于「在资源管理器中显示」；网址等协议地址不算）
+  function isLocalTarget(t) {
+    const s = trim(t);
+    if (!s) return false;
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) return false;
+    return s.indexOf('\\') >= 0 || s.indexOf('/') >= 0;
+  }
+
   // 新增行列/页时随机一个标记色（取色板，避免过浅/过暗）
   const COLOR_PALETTE = ['#5b9dff', '#a78bfa', '#4fc08d', '#e3b341', '#f7786b', '#5ec8e0', '#ec7db8', '#7c8aff', '#5ad1a0', '#f59e0b'];
   function randomColor() { return COLOR_PALETTE[Math.floor(Math.random() * COLOR_PALETTE.length)]; }
@@ -1422,7 +1430,7 @@
     openMenu(x, y, [
       { label: '打开', action: () => launchItem(item) },
       { label: '编辑', action: () => openItemDialog(cellKey, item) },
-      item.target && (item.target.indexOf('\\') >= 0 || item.target.indexOf('/') >= 0)
+      item.target && isLocalTarget(item.target)
         ? { label: '在资源管理器中显示', action: () => api.reveal(item.target) }
         : { sep: true },
       {
@@ -1449,7 +1457,7 @@
       { label: '打开所在页面', action: () => switchPage(hit.pageId) },
       { sep: true },
       { label: '编辑', action: () => { switchPage(hit.pageId); openItemDialog(hit.key, item); } },
-      item.target && (item.target.indexOf('\\') >= 0 || item.target.indexOf('/') >= 0)
+      item.target && isLocalTarget(item.target)
         ? { label: '在资源管理器中显示', action: () => api.reveal(item.target) }
         : { sep: true },
     ]);
@@ -1952,11 +1960,9 @@
           openMenu(e.clientX, e.clientY, [
             { label: '打开', action: () => launchItem(item) },
             { label: '编辑', action: () => { closeDialog(); openItemDialog(key, item); } },
-            { label: '移到其他格子…', action: () => {
-              closeDialog();
-              toast('拖动这个图标到目标格子即可移动', 'ok');
-            } },
-            { sep: true },
+            item.target && isLocalTarget(item.target)
+              ? { label: '在资源管理器中显示', action: () => api.reveal(item.target) }
+              : { sep: true },
             { label: '删除', danger: true, action: () => {
               const cur2 = cellOf(key, false);
               if (!cur2) return;
