@@ -46,4 +46,11 @@ contextBridge.exposeInMainWorld('workbench', {
     closePassword: () => ipcRenderer.invoke('rest:force-close-password'),
     onStatus: (cb) => ipcRenderer.on('rest:status', (_e, s) => cb(s)),
   },
+
+  // 主题：dark / light / system
+  theme: {
+    get: () => ipcRenderer.invoke('theme:get'),
+    set: (source) => ipcRenderer.invoke('theme:set', source),
+    onChange: (cb) => ipcRenderer.on('theme:changed', (_e, t) => cb(t)),
+  },
 });

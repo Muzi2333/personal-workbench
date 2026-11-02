@@ -1,4 +1,4 @@
-:root {
+:root, html[data-theme="dark"] {
   color-scheme: dark;
   --bg: #202224;
   --panel: #26292b;
@@ -9,6 +9,22 @@
   --accent: #4c8dff;
   --danger: #f06a5f;
 }
+
+html[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --panel: #ffffff;
+  --line: rgba(0, 0, 0, 0.12);
+  --text: #1f2328;
+  --dim: #5e6570;
+  --dim-2: #8b9199;
+  --accent: #2563eb;
+  --danger: #dc2626;
+}
+
+html[data-theme="light"] .btn { background: rgba(0,0,0,0.04); }
+html[data-theme="light"] .btn:hover { background: rgba(0,0,0,0.09); }
+html[data-theme="light"] .btn.ghost:hover { background: rgba(0,0,0,0.06); }
 
 * { box-sizing: border-box; }
 

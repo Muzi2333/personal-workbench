@@ -1,4 +1,4 @@
-:root {
+:root, html[data-theme="dark"] {
   --bg: #191a1b;
   --bg-elev: #212324;
   --panel: #242627;
@@ -17,6 +17,26 @@
   --icon-size: 54px;
   --gap: 10px;
   --radius: 12px;
+}
+
+html[data-theme="light"] {
+  --bg: #f3f4f6;
+  --bg-elev: #ffffff;
+  --panel: #ffffff;
+  --cell: #ffffff;
+  --cell-hi: #e8eaf0;
+  --line: #d6d9df;
+  --line-soft: #e4e7ed;
+  --text: #1f2328;
+  --dim: #5e6570;
+  --dim-2: #8b9199;
+  --accent: #2563eb;
+  --accent-soft: rgba(37, 99, 235, 0.14);
+  --danger: #dc2626;
+}
+
+html[data-theme="light"] body {
+  background: var(--bg);
 }
 
 * { box-sizing: border-box; }
@@ -151,6 +171,23 @@ body {
 .set-num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 /* 设置页退出密码输入框：宽度由 JS 按内容长度设置（同撤销上限），.input 的 width:100% 在后面会覆盖类样式 */
 .set-pass { flex: 0 0 auto; letter-spacing: 1px; }
+
+.set-select {
+  flex: 0 0 auto;
+  padding: 4px 22px 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M0 0l5 6 5-6z' fill='%236f767c'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  appearance: none;
+  -webkit-appearance: none;
+}
 
 /* 设置页三大页签：通用 / 休息 / 应用 */
 .set-tabs {

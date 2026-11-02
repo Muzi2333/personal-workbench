@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, screen, net } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, screen, net, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -129,11 +129,46 @@ if (!app.requestSingleInstanceLock()) {
 } else {
   app.on('second-instance', showMainWindow);
 
+  // 主题：dark / light / system（Electron nativeTheme）
+  function applyThemeSource(source) {
+    if (source === 'light' || source === 'dark' || source === 'system') {
+      nativeTheme.themeSource = source;
+    } else {
+      nativeTheme.themeSource = 'system';
+    }
+  }
+  function broadcastTheme() {
+    const payload = {
+      source: nativeTheme.themeSource,
+      dark: nativeTheme.shouldUseDarkColors,
+    };
+    try {
+      // 发给所有 BrowserWindow（主窗口 + rest.js 的 countdown/reminder/force/password 子窗口）
+      const { BrowserWindow } = require('electron');
+      BrowserWindow.getAllWindows().forEach((w) => {
+        if (!w.isDestroyed()) w.webContents.send('theme:changed', payload);
+      });
+    } catch (_) {}
+  }
+  function loadAndApplyTheme() {
+    let source = 'system';
+    try {
+      if (fs.existsSync(dataFile())) {
+        const raw = JSON.parse(fs.readFileSync(dataFile(), 'utf8'));
+        if (raw && raw.settings && raw.settings.theme) source = raw.settings.theme;
+      }
+    } catch (_) {}
+    applyThemeSource(source);
+  }
+
   app.whenReady().then(() => {
+    loadAndApplyTheme();
+    nativeTheme.on('updated', broadcastTheme);
     createWindow();
     createTray();
     restManager = createRestManager({ getMainWindow: () => win, onStatus: updateTrayTip });
     updateTrayTip(restManager.getStatus());
+    broadcastTheme();
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
@@ -277,6 +312,11 @@ async function launchTarget({ target, args, cwd } = {}) {
 
   const exists = fs.existsSync(raw);
 
+  // 非 URL 的本地路径不存在：明确返回 NOT_FOUND 让上层决定是否弹提示
+  if (!isURI && !exists) {
+    return { ok: false, code: 'NOT_FOUND', error: '找不到目标文件', target: raw };
+  }
+
   // 2. 目录：交给系统打开
   if (exists) {
     let stat = null;
@@ -338,6 +378,17 @@ ipcMain.handle('target:launch', async (_e, payload) => {
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
   }
+});
+
+ipcMain.handle('theme:get', async () => ({
+  source: nativeTheme.themeSource,
+  dark: nativeTheme.shouldUseDarkColors,
+}));
+
+ipcMain.handle('theme:set', async (_e, source) => {
+  applyThemeSource(source);
+  broadcastTheme();
+  return { ok: true, source: nativeTheme.themeSource, dark: nativeTheme.shouldUseDarkColors };
 });
 
 // 高清图标：调 PowerShell + SHDefExtractIcon 取 256px（与桌面图标同源），失败回退 getFileIcon

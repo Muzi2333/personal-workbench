@@ -211,7 +211,7 @@
       version: 3,
       pages: [{ id: 'p1', name: '主页', rows, cols, cells, layout: { gap: 10 } }],
       activePage: 'p1',
-      settings: { iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false },
+      settings: { iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false, theme: 'system' },
       iconCache: {},
     };
   }
@@ -273,7 +273,7 @@
 
     if (!data.pages.some((p) => p.id === data.activePage)) data.activePage = data.pages[0].id;
 
-    data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false }, data.settings || {});
+    data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false, theme: 'system' }, data.settings || {});
     data.iconCache = data.iconCache || {};
     // 图标缓存版本：修复打包版 256px 提取脚本缺失（此前一直落 48px 模糊兜底），清缓存重取
     if (data.cacheVer !== 6) {
@@ -362,6 +362,24 @@
   };
 
   // 倒计时统一文案：>60 秒显示「X分」（向上取整），≤60 秒显示「X秒」
+  // ---- 主题 ----
+  function applyThemeDom(t) {
+    const html = document.documentElement;
+    // t: {source:'dark'|'light'|'system', dark: boolean}
+    if (t && t.source === 'light') html.setAttribute('data-theme', 'light');
+    else if (t && t.source === 'dark') html.setAttribute('data-theme', 'dark');
+    else html.setAttribute('data-theme', (t && t.dark) ? 'dark' : 'light');
+  }
+  function applyCurrentTheme() {
+    const source = (state && state.settings && state.settings.theme) || 'system';
+    if (api && api.theme) {
+      api.theme.set(source).then((t) => applyThemeDom(t)).catch(() => {});
+    } else {
+      // 浏览器预览：默认深色
+      applyThemeDom({ source, dark: true });
+    }
+  }
+
   function fmtRemain(seconds) {
     const s = Math.max(0, Math.ceil(Number(seconds) || 0));
     return s > 60 ? Math.ceil(s / 60) + '分' : s + '秒';
@@ -472,6 +490,17 @@
       '  <div class="set-group-title">布局</div>',
       '  <div class="set-row btns" data-skey="reset">',
       '    <button class="btn danger" id="st-reset">恢复默认布局</button>',
+      '  </div>',
+      '</div>',
+      '<div class="set-group">',
+      '  <div class="set-group-title">外观</div>',
+      '  <div class="set-row" data-skey="theme">',
+      '    <div class="set-label">外观主题<span class="set-desc">深色 / 浅色 / 跟随系统</span></div>',
+      '    <select class="set-select" id="st-theme">',
+      '      <option value="system">跟随系统</option>',
+      '      <option value="dark">深色</option>',
+      '      <option value="light">浅色</option>',
+      '    </select>',
       '  </div>',
       '</div>',
       '<div class="set-group" data-skey="about">',
@@ -767,6 +796,24 @@
       Promise.resolve(api.appVersion()).then((v) => {
         if (v) aboutVer.textContent = 'v' + v;
       }).catch(() => {});
+    }
+
+    // 主题下拉：初始化选中值 + change 即时生效
+    const themeSel = q('#st-theme');
+    if (themeSel) {
+      const v = state.settings.theme || 'system';
+      if ([...themeSel.options].some((o) => o.value === v)) themeSel.value = v;
+      themeSel.addEventListener('change', () => {
+        const source = themeSel.value;
+        pushHistory();
+        state.settings.theme = source;
+        scheduleSave();
+        if (api.theme) {
+          api.theme.set(source).then((t) => applyThemeDom(t)).catch(() => {});
+        } else {
+          applyThemeDom({ source, dark: source === 'dark' });
+        }
+      });
     }
 
     /* -------------------------------- 应用页 -------------------------------- */
@@ -1193,7 +1240,60 @@
       return;
     }
     const res = await api.launch({ target: item.target, args: item.args || '', cwd: item.cwd || '' });
-    if (!res || !res.ok) toast((res && res.error) || '启动失败', 'err');
+    if (!res || !res.ok) {
+      // 目标文件不存在：弹窗让用户选择重新编辑 / 删除 / 取消
+      if (res && res.code === 'NOT_FOUND') {
+        const key = findCellKeyOfItem(item.id);
+        openDialog({
+          title: '目标已不存在',
+          body: '<div class="hintline" style="color:var(--text);font-size:13px;margin:2px 0 4px">'
+            + '「' + (item.name || '未命名') + '」的目标文件已移动或删除。</div>'
+            + '<div class="hintline" style="margin-top:8px;color:var(--dim-2);font-size:11.5px">'
+            + (item.target || '') + '</div>',
+          buttons: [
+            { label: '取消', ghost: true },
+            {
+              label: '删除图标',
+              danger: true,
+              onClick: () => {
+                // 从所有格子中移除 + 清理
+                state.pages.forEach((p) => {
+                  Object.keys(p.cells || {}).forEach((k) => {
+                    const items = p.cells[k].items || [];
+                    const idx = items.findIndex((i) => i.id === item.id);
+                    if (idx >= 0) {
+                      items.splice(idx, 1);
+                      cleanupCell(k);
+                    }
+                  });
+                });
+                scheduleSave();
+                render();
+                toast('已删除该图标', 'ok');
+              },
+            },
+            key ? {
+              label: '重新编辑',
+              primary: true,
+              onClick: () => { openItemDialog(key, item); return false; }, // return false 保持弹窗
+            } : null,
+          ].filter(Boolean),
+        });
+        return;
+      }
+      toast((res && res.error) || '启动失败', 'err');
+    }
+  }
+
+  // 辅助：遍历所有页面找到包含某个 itemId 的第一个 cellKey
+  function findCellKeyOfItem(itemId) {
+    for (const p of state.pages) {
+      for (const k of Object.keys(p.cells || {})) {
+        const items = (p.cells[k] && p.cells[k].items) || [];
+        if (items.some((i) => i.id === itemId)) return k;
+      }
+    }
+    return null;
   }
 
   function handleIconTap(item) {
@@ -2840,6 +2940,12 @@
     // 标题栏居中展示休息提醒状态（订阅 + 首帧轮询）
     restApi.getStatus().then(paintTbRest).catch(() => {});
     restApi.onStatus(paintTbRest);
+
+    // 主题：读当前配置并订阅系统变化
+    applyCurrentTheme();
+    if (api.theme) api.theme.onChange((t) => applyThemeDom(t));
+    if (api.theme) api.theme.get().then((t) => applyThemeDom(t)).catch(() => {});
+    else applyThemeDom({ source: state.settings.theme || 'system', dark: true });
 
     if (!isElectron) {
       toast('浏览器预览模式：可以体验排版，启动本地程序需用 Electron 运行', 'err');

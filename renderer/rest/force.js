@@ -1,8 +1,21 @@
 (function () {
   'use strict';
 
-  const api = window.workbench && window.workbench.rest;
-  if (!api) return;
+  const api = window.workbench;
+  const restApi = api && api.rest;
+  if (!restApi) return;
+
+  // 主题：读初始 + 订阅系统变化
+  function applyThemeDom(t) {
+    const html = document.documentElement;
+    if (t && t.source === 'light') html.setAttribute('data-theme', 'light');
+    else if (t && t.source === 'dark') html.setAttribute('data-theme', 'dark');
+    else html.setAttribute('data-theme', (t && t.dark) ? 'dark' : 'light');
+  }
+  if (api && api.theme) {
+    api.theme.get().then((t) => applyThemeDom(t)).catch(() => {});
+    api.theme.onChange((t) => applyThemeDom(t));
+  }
 
   const timeEl = document.getElementById('force-time');
   const ringEl = document.getElementById('force-ring');
@@ -20,7 +33,7 @@
   }
 
   function askPassword() {
-    api.openPassword();
+    restApi.openPassword();
   }
 
   document.getElementById('force-exit').addEventListener('click', askPassword);
@@ -31,6 +44,6 @@
     }
   });
 
-  api.getStatus().then(paint).catch(() => {});
-  api.onStatus(paint);
+  restApi.getStatus().then(paint).catch(() => {});
+  restApi.onStatus(paint);
 })();

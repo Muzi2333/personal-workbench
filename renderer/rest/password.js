@@ -1,8 +1,21 @@
 (function () {
   'use strict';
 
-  const api = window.workbench && window.workbench.rest;
-  if (!api) return;
+  const api = window.workbench;
+  const restApi = api && api.rest;
+  if (!restApi) return;
+
+  // 主题：读初始 + 订阅系统变化
+  function applyThemeDom(t) {
+    const html = document.documentElement;
+    if (t && t.source === 'light') html.setAttribute('data-theme', 'light');
+    else if (t && t.source === 'dark') html.setAttribute('data-theme', 'dark');
+    else html.setAttribute('data-theme', (t && t.dark) ? 'dark' : 'light');
+  }
+  if (api && api.theme) {
+    api.theme.get().then((t) => applyThemeDom(t)).catch(() => {});
+    api.theme.onChange((t) => applyThemeDom(t));
+  }
 
   const input = document.getElementById('pw-input');
   const errEl = document.getElementById('pw-err');
@@ -24,14 +37,14 @@
     }
     let res = null;
     try {
-      res = await api.verifyPassword(value);
+      res = await restApi.verifyPassword(value);
     } catch (_) {}
     if (res && res.ok) return; // 主进程已关闭本窗口并退出强制休息
     fail((res && res.error) || '密码错误');
   }
 
   function cancel() {
-    api.closePassword();
+    restApi.closePassword();
   }
 
   document.getElementById('pw-ok').addEventListener('click', submit);
