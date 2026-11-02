@@ -5,6 +5,18 @@
 
   const FALLBACK_KEY = 'workbench-data-v1';
 
+  // 休息配置默认值（仅浏览器预览兜底；Electron 下以主进程配置为准）
+  const REST_FALLBACK = {
+    enabled: true,
+    free_minutes: 5,
+    work_minutes: 45,
+    countdown_minutes: 10,
+    force_rest_minutes: 5,
+    screen_saver_mode: 'mode1',
+    exit_password: '123',
+  };
+  const FALLBACK_REST_KEY = 'workbench-rest-config-v1';
+
   function fallbackApi() {
     return {
       preview: true,
@@ -30,11 +42,36 @@
       pathForFile: () => '',
       win: { minimize() {}, toggleMax() {}, close() {} },
       onWindowState() {},
+      rest: {
+        getConfig: async () => {
+          try { return Object.assign({}, REST_FALLBACK, JSON.parse(localStorage.getItem(FALLBACK_REST_KEY) || '{}')); } catch (_) { return Object.assign({}, REST_FALLBACK); }
+        },
+        setConfig: async (patch) => {
+          try {
+            const next = Object.assign({}, await fallbackApi().rest.getConfig(), patch || {});
+            localStorage.setItem(FALLBACK_REST_KEY, JSON.stringify(next));
+            return { ok: true, config: next };
+          } catch (_) {
+            return { ok: false, error: '预览模式保存失败' };
+          }
+        },
+        getStatus: async () => ({ enabled: true, state: 'idle', usedSeconds: 0, countdownSeconds: 0, restSeconds: 0, mode: 'mode1' }),
+        remindNow: async () => ({ ok: false, error: '预览模式不支持休息提醒' }),
+        forceNow: async () => ({ ok: false, error: '预览模式不支持强制休息' }),
+        closeCountdown: async () => ({ ok: false }),
+        closeReminder: async () => ({ ok: false }),
+        openPassword: async () => ({ ok: false }),
+        verifyPassword: async () => ({ ok: false }),
+        closePassword: async () => ({ ok: false }),
+        onStatus: () => {},
+      },
     };
   }
 
   const api = window.workbench || fallbackApi();
   const isElectron = !!window.workbench;
+  // 兼容旧版 preload（没有 rest 命名空间）与浏览器预览
+  const restApi = api.rest || fallbackApi().rest;
 
   /* --------------------------------- 工具函数 --------------------------------- */
 
@@ -75,7 +112,15 @@
     lastTap: { item: '', t: 0 },
     searchPage: null, // 搜索结果临时页（不落盘）
     settingsOpen: false, // 设置页（侧栏齿轮进入，不落盘）
+    settingsTab: 'general', // 设置页当前标签：general / rest / app
+    settingsQuery: '', // 设置页搜索词（不落盘）
+    restShowPassword: false, // 设置页「显示密码」勾选状态
   };
+
+  // 电脑休息提醒：配置缓存与状态（设置页打开时每秒刷新）
+  let restConfig = Object.assign({}, REST_FALLBACK);
+  let restStatus = { state: 'idle', usedSeconds: 0, countdownSeconds: 0, restSeconds: 0 };
+  let restStatusTimer = null;
 
   const el = {};
 
@@ -288,163 +333,577 @@
     $('btn-search').classList.remove('hidden');
     ui.settingsOpen = true;
     render();
+    // 配置从主进程读取；读回后刷新当前设置页（失败则保留默认缓存）
+    Promise.resolve(restApi.getConfig()).then((cfg) => {
+      if (cfg) restConfig = Object.assign({}, REST_FALLBACK, cfg);
+      if (ui.settingsOpen) render();
+    }).catch(() => {});
   }
 
   function closeSettings() {
     if (!ui.settingsOpen) return;
+    stopRestStatusTimer();
     ui.settingsOpen = false;
     render();
   }
 
-  // 设置页：渲染进宫格区域，包含原设置菜单内容（不含 4 个添加按钮）
+  function stopRestStatusTimer() {
+    if (restStatusTimer) {
+      clearInterval(restStatusTimer);
+      restStatusTimer = null;
+    }
+  }
+
+  const REST_STATE_TEXT = {
+    idle: '空闲',
+    working: '正常计时',
+    reminding: '倒计时提醒中',
+    resting: '强制休息中',
+  };
+
+  // 倒计时统一文案：>60 秒显示「X分」（向上取整），≤60 秒显示「X秒」
+  function fmtRemain(seconds) {
+    const s = Math.max(0, Math.ceil(Number(seconds) || 0));
+    return s > 60 ? Math.ceil(s / 60) + '分' : s + '秒';
+  }
+
+  // 标题栏居中的休息状态：空闲中 / X分后提醒休息 / 休息倒计时 X分 / 强制休息还剩 X分
+  function paintTbRest(st) {
+    const tb = $('tb-rest');
+    if (!tb) return;
+    if (!st || st.enabled === false) {
+      tb.textContent = '';
+      tb.className = 'tb-rest';
+      return;
+    }
+    const state = st.state || 'idle';
+    let text = '空闲中';
+    if (state === 'working') {
+      const remain = Math.max(0, (Number(st.workSecondsTotal) || 0) - (Number(st.usedSeconds) || 0));
+      text = fmtRemain(remain) + '后提醒休息';
+    } else if (state === 'reminding') {
+      text = '休息倒计时 ' + fmtRemain(st.countdownSeconds);
+    } else if (state === 'resting') {
+      text = st.mode === 'mode2' ? '强制休息中 · 锁屏中' : '强制休息还剩 ' + fmtRemain(st.restSeconds);
+    }
+    tb.textContent = text;
+    tb.className = 'tb-rest rest-state-' + state;
+  }
+
+  // 保存休息配置：修改后立即写入主进程配置文件
+  function saveRestConfig(patch, silent) {
+    restConfig = Object.assign({}, restConfig, patch || {});
+    Promise.resolve(restApi.setConfig(patch)).then((res) => {
+      if (res && res.ok && res.config) {
+        restConfig = Object.assign({}, REST_FALLBACK, res.config);
+      } else if (res && res.error && !silent) {
+        toast(res.error, 'err');
+      }
+      refreshRestStatus();
+    }).catch(() => {
+      if (!silent) toast('休息设置保存失败', 'err');
+    });
+  }
+
+  async function refreshRestStatus() {
+    if (!ui.settingsOpen || ui.settingsTab !== 'rest') return;
+    try {
+      const st = await restApi.getStatus();
+      if (st) {
+        restStatus = st;
+        paintRestStatus(st);
+        paintTbRest(st); // 顺手同步标题栏
+      }
+    } catch (_) {}
+  }
+
+  function paintRestStatus(st) {
+    if (!el.grid) return;
+    const dot = el.grid.querySelector('#st-rest-dot');
+    const stateEl = el.grid.querySelector('#st-rest-state');
+    if (!dot || !stateEl) return;
+
+    const state = (st && st.state) || 'idle';
+    stateEl.textContent = REST_STATE_TEXT[state] || '空闲';
+    dot.className = 'rest-dot state-' + state;
+
+    const used = el.grid.querySelector('#st-rest-used');
+    if (used) {
+      if (state === 'working') {
+        const remain = Math.max(0, (Number(st.workSecondsTotal) || 0) - (Number(st.usedSeconds) || 0));
+        used.textContent = fmtRemain(remain);
+      } else used.textContent = '—';
+    }
+
+    const left = el.grid.querySelector('#st-rest-left');
+    if (left) {
+      if (state === 'reminding') left.textContent = fmtRemain(st.countdownSeconds);
+      else if (state === 'resting') {
+        left.textContent = st.mode === 'mode2' ? '等待解锁' : fmtRemain(st.restSeconds);
+      } else left.textContent = '—';
+    }
+
+    const modeEl = el.grid.querySelector('#st-rest-mode-label');
+    if (modeEl) modeEl.textContent = (restConfig.screen_saver_mode === 'mode2') ? '系统锁屏' : '自绘全屏';
+
+    const note = el.grid.querySelector('#st-rest-note');
+    if (note) {
+      if (!restConfig.enabled || !st || st.enabled === false) note.textContent = '总开关已关闭，休息提醒不会触发。';
+      else if (state === 'idle') note.textContent = '电脑处于空闲状态，空闲时间不计入使用时长。';
+      else if (state === 'working') note.textContent = '正在累计连续使用时长，达到阈值后弹出休息提醒。';
+      else if (state === 'reminding') note.textContent = '提醒弹窗与倒计时已启动，关闭提醒弹窗不会中止倒计时。';
+      else if (state === 'resting') note.textContent = restConfig.screen_saver_mode === 'mode2'
+        ? '系统已锁定，解锁登录后自动结束强制休息。'
+        : '全屏强制休息中，可按 ESC 输入密码提前结束。';
+    }
+  }
+
+  function generalTabHtml() {
+    return [
+      '<div class="set-group">',
+      '  <div class="set-group-title">数据</div>',
+      '  <div class="set-row btns" data-skey="import">',
+      '    <button class="btn" id="st-import">导入配置…</button>',
+      '    <button class="btn" id="st-export">导出配置…</button>',
+      '    <button class="btn" id="st-datadir">打开数据目录</button>',
+      '  </div>',
+      '</div>',
+      '<div class="set-group">',
+      '  <div class="set-group-title">布局</div>',
+      '  <div class="set-row btns" data-skey="reset">',
+      '    <button class="btn danger" id="st-reset">恢复默认布局</button>',
+      '  </div>',
+      '</div>',
+      '<div class="set-group" data-skey="about">',
+      '  <div class="set-group-title">关于</div>',
+      '  <div class="about-top">',
+      '    <img class="about-ico" src="../assets/icon.png" alt="" />',
+      '    <div>',
+      '      <div class="about-name">工作台</div>',
+      '      <div class="about-desc">Win11 风格的桌面快捷方式宫格</div>',
+      '    </div>',
+      '  </div>',
+      '  <div class="about-rows">',
+      '    <div class="about-row"><span>作者</span><b>Muzi_xy</b></div>',
+      '    <div class="about-row"><span>版本</span><b id="st-about-ver">—</b></div>',
+      '    <div class="about-row"><span>开源地址</span><a href="' + REPO_URL + '" id="st-about-link">github.com/Muzi2333/personal-workbench</a></div>',
+      '  </div>',
+      '</div>',
+    ].join('');
+  }
+
+  function restTabHtml() {
+    const c = restConfig;
+    return [
+      '<div class="set-group">',
+      '  <div class="set-group-title">运行状态（每秒刷新）</div>',
+      '  <div class="rest-status">',
+      '    <div class="rest-status-head">',
+      '      <span class="rest-dot state-idle" id="st-rest-dot"></span>',
+      '      <b id="st-rest-state">空闲</b>',
+      '      <span class="rest-status-mode" id="st-rest-mode-label">自绘全屏</span>',
+      '    </div>',
+      '    <div class="rest-status-cols">',
+      '      <div class="rest-status-item"><span>距提醒休息</span><b id="st-rest-used">—</b></div>',
+      '      <div class="rest-status-item"><span>剩余倒计时</span><b id="st-rest-left">—</b></div>',
+      '    </div>',
+      '  </div>',
+      '  <div class="rest-status-note" id="st-rest-note">电脑处于空闲状态，空闲时间不计入使用时长。</div>',
+      '</div>',
+      '<div class="set-group">',
+      '  <div class="set-group-title">休息提醒</div>',
+      '  <div class="set-row" data-skey="rest-enabled">',
+      '    <div class="set-label">电脑休息提醒<span class="set-desc">总开关，关闭后不检测、不提醒</span></div>',
+      '    <button class="switch' + (c.enabled ? ' on' : '') + '" id="st-rest-enabled" role="switch" title="开启 / 关闭电脑休息提醒"></button>',
+      '  </div>',
+      '  <div class="set-row" data-skey="rest-free">',
+      '    <div class="set-label">空闲判断时间<span class="set-desc">无鼠标键盘操作达到该时长后重置计时，单位分钟</span></div>',
+      '    <input class="input set-num" id="st-rest-free" type="number" min="1" max="120" step="1" value="' + c.free_minutes + '">',
+      '  </div>',
+      '  <div class="set-row" data-skey="rest-work">',
+      '    <div class="set-label">连续使用时长<span class="set-desc">连续使用达到该时长后弹出休息提醒，单位分钟</span></div>',
+      '    <input class="input set-num" id="st-rest-work" type="number" min="1" max="480" step="1" value="' + c.work_minutes + '">',
+      '  </div>',
+      '  <div class="set-row" data-skey="rest-countdown">',
+      '    <div class="set-label">倒计时时长<span class="set-desc">提醒后到进入强制休息的倒计时，单位分钟</span></div>',
+      '    <input class="input set-num" id="st-rest-countdown" type="number" min="1" max="120" step="1" value="' + c.countdown_minutes + '">',
+      '  </div>',
+      '  <div class="set-row" data-skey="rest-force">',
+      '    <div class="set-label">强制休息时长<span class="set-desc">自绘全屏模式的持续时长；系统锁屏模式忽略此项</span></div>',
+      '    <input class="input set-num" id="st-rest-force" type="number" min="1" max="120" step="1" value="' + c.force_rest_minutes + '">',
+      '  </div>',
+      '  <div class="set-row" data-skey="rest-mode">',
+      '    <div class="set-label">强制休息方式<span class="set-desc">模式1：自绘全屏界面；模式2：调用系统锁屏</span></div>',
+      '    <div class="seg" id="st-rest-mode">',
+      '      <button data-v="mode1"' + (c.screen_saver_mode !== 'mode2' ? ' class="on"' : '') + '>自绘全屏</button>',
+      '      <button data-v="mode2"' + (c.screen_saver_mode === 'mode2' ? ' class="on"' : '') + '>系统锁屏</button>',
+      '    </div>',
+      '  </div>',
+      '  <div class="set-row" data-skey="rest-password">',
+      '    <div class="set-label">退出密码<span class="set-desc">mode1 全屏界面提前退出时使用</span></div>',
+      '    <input class="input set-pass" id="st-rest-password" type="' + (ui.restShowPassword ? 'text' : 'password') + '" value="' + String(c.exit_password || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '" autocomplete="off" spellcheck="false">',
+      '  </div>',
+      '  <div class="set-row" data-skey="rest-showpw">',
+      '    <div class="set-label">显示密码<span class="set-desc">勾选后以明文展示退出密码</span></div>',
+      '    <label class="check" title="勾选后以明文展示退出密码"><input type="checkbox" id="st-rest-showpw"' + (ui.restShowPassword ? ' checked' : '') + '></label>',
+      '  </div>',
+      '</div>',
+    ].join('');
+  }
+
+  // 设置项搜索索引：id 对应行上的 data-skey，点击结果跳到所属页签并高亮
+  const SETTINGS_INDEX = [
+    { id: 'import', tab: 'general', name: '导入配置 / 导出配置 / 打开数据目录', desc: '数据备份、迁移与数据文件位置' },
+    { id: 'reset', tab: 'general', name: '恢复默认布局', desc: '清空当前布局，回到初始三行三列' },
+    { id: 'about', tab: 'general', name: '关于', desc: '应用图标、作者、版本号、开源地址' },
+    { id: 'rest-enabled', tab: 'rest', name: '电脑休息提醒（总开关）', desc: '关闭后不检测、不提醒' },
+    { id: 'rest-free', tab: 'rest', name: '空闲判断时间', desc: '无鼠标键盘操作达到该时长后重置计时，单位分钟' },
+    { id: 'rest-work', tab: 'rest', name: '连续使用时长', desc: '连续使用达到该时长后弹出休息提醒，单位分钟' },
+    { id: 'rest-countdown', tab: 'rest', name: '倒计时时长', desc: '提醒后到进入强制休息的倒计时，单位分钟' },
+    { id: 'rest-force', tab: 'rest', name: '强制休息时长', desc: '自绘全屏模式的持续时长；系统锁屏模式忽略此项' },
+    { id: 'rest-mode', tab: 'rest', name: '强制休息方式', desc: '模式1：自绘全屏界面；模式2：调用系统锁屏' },
+    { id: 'rest-password', tab: 'rest', name: '退出密码', desc: 'mode1 全屏界面提前退出时使用' },
+    { id: 'rest-showpw', tab: 'rest', name: '显示密码', desc: '勾选后以明文展示退出密码' },
+    { id: 'app-launch', tab: 'app', name: '启动方式', desc: '点击图标时单击 / 双击启动' },
+    { id: 'app-labels', tab: 'app', name: '图标名称', desc: '在图标下方显示名称' },
+    { id: 'app-undo', tab: 'app', name: '撤销历史上限', desc: '最多保留多少条操作记录，0 = 关闭撤销' },
+  ];
+  const SETTINGS_TAB_NAME = { general: '通用', rest: '休息', app: '应用' };
+
+  // 复用全局搜索的 matchItem：名称 + 描述合并匹配（包含 / 全拼 / 首拼 / 英文首字母 / 子序列模糊）
+  function matchSetting(entry, q, compact) {
+    return matchItem({ name: entry.name + ' ' + entry.desc }, q, compact);
+  }
+
+  // 跳到某个设置项：切页签、清搜索、滚动定位并闪烁高亮
+  function jumpToSetting(id) {
+    const entry = SETTINGS_INDEX.find((it) => it.id === id);
+    if (!entry) return;
+    ui.settingsQuery = '';
+    ui.settingsTab = entry.tab;
+    render();
+    requestAnimationFrame(() => {
+      const row = el.grid.querySelector('[data-skey="' + id + '"]');
+      if (!row) return;
+      if (typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'center' });
+      row.classList.remove('flash');
+      void row.offsetWidth;
+      row.classList.add('flash');
+    });
+  }
+
+  function appTabHtml(s) {
+    return [
+      '<div class="set-group">',
+      '  <div class="set-row" data-skey="app-launch">',
+      '    <div class="set-label">启动方式<span class="set-desc">点击图标时的启动方式</span></div>',
+      '    <div class="seg" id="st-launch">',
+      '      <button data-v="single"' + (s.launch !== 'double' ? ' class="on"' : '') + '>单击</button>',
+      '      <button data-v="double"' + (s.launch === 'double' ? ' class="on"' : '') + '>双击</button>',
+      '    </div>',
+      '  </div>',
+      '  <div class="set-row" data-skey="app-labels">',
+      '    <div class="set-label">图标名称<span class="set-desc">在图标下方显示名称</span></div>',
+      '    <button class="switch' + (s.showLabels ? ' on' : '') + '" id="st-labels" role="switch" title="显示 / 隐藏图标名称"></button>',
+      '  </div>',
+      '  <div class="set-row" data-skey="app-undo">',
+      '    <div class="set-label">撤销历史上限<span class="set-desc">最多保留多少条操作记录，0 = 关闭撤销</span></div>',
+      '    <input class="input set-num" id="st-undo" type="number" min="0" max="1000" value="' + (s.undoLimit || 0) + '">',
+      '  </div>',
+      '</div>',
+    ].join('');
+  }
+
+  // 设置页：三大页（通用 / 休息 / 应用），渲染进宫格区域
   function renderSettingsPage() {
+    stopRestStatusTimer();
+    if (!restConfig || typeof restConfig !== 'object') restConfig = Object.assign({}, REST_FALLBACK);
+
     const s = state.settings;
+    const tab = ui.settingsTab || 'general';
+    const tabs = [['general', '通用'], ['rest', '休息'], ['app', '应用']];
+
     el.grid.style.display = 'block';
     el.grid.innerHTML = [
       '<div class="settings-page">',
       '  <div class="settings-head">',
       '    <button class="btn" id="st-back">‹ 返回</button>',
       '    <span class="settings-title">设置</span>',
+      '    <input class="input st-search" id="st-search" placeholder="搜索设置项…" autocomplete="off" spellcheck="false">',
       '  </div>',
-      '  <div class="set-group">',
-      '    <div class="set-row">',
-      '      <div class="set-label">启动方式<span class="set-desc">点击图标时的启动方式</span></div>',
-      '      <div class="seg" id="st-launch">',
-      '        <button data-v="single"' + (s.launch !== 'double' ? ' class="on"' : '') + '>单击</button>',
-      '        <button data-v="double"' + (s.launch === 'double' ? ' class="on"' : '') + '>双击</button>',
-      '      </div>',
-      '    </div>',
-      '    <div class="set-row">',
-      '      <div class="set-label">图标名称<span class="set-desc">在图标下方显示名称</span></div>',
-      '      <button class="switch' + (s.showLabels ? ' on' : '') + '" id="st-labels" role="switch" title="显示 / 隐藏图标名称"></button>',
-      '    </div>',
-      '    <div class="set-row">',
-      '      <div class="set-label">撤销历史上限<span class="set-desc">最多保留多少条操作记录，0 = 关闭撤销</span></div>',
-      '      <input class="input set-num" id="st-undo" type="number" min="0" max="1000" value="' + (s.undoLimit || 0) + '">',
-      '    </div>',
+      '  <div class="set-tabs" id="st-tabs">',
+      tabs.map(([key, name]) => '    <button data-tab="' + key + '"' + (tab === key ? ' class="on"' : '') + '>' + name + '</button>').join(''),
       '  </div>',
-      '  <div class="set-group">',
-      '    <div class="set-group-title">数据</div>',
-      '    <div class="set-row btns">',
-      '      <button class="btn" id="st-import">导入配置…</button>',
-      '      <button class="btn" id="st-export">导出配置…</button>',
-      '      <button class="btn" id="st-datadir">打开数据目录</button>',
-      '    </div>',
-      '  </div>',
-      '  <div class="set-group">',
-      '    <div class="set-group-title">布局</div>',
-      '    <div class="set-row btns">',
-      '      <button class="btn danger" id="st-reset">恢复默认布局</button>',
-      '    </div>',
-      '  </div>',
-      '  <div class="set-group">',
-      '    <div class="set-group-title">关于</div>',
-      '    <div class="about-top">',
-      '      <img class="about-ico" src="../assets/icon.png" alt="" />',
-      '      <div>',
-      '        <div class="about-name">工作台</div>',
-      '        <div class="about-desc">Win11 风格的桌面快捷方式宫格</div>',
-      '      </div>',
-      '    </div>',
-      '    <div class="about-rows">',
-      '      <div class="about-row"><span>作者</span><b>Muzi_xy</b></div>',
-      '      <div class="about-row"><span>版本</span><b id="st-about-ver">—</b></div>',
-      '      <div class="about-row"><span>开源地址</span><a href="' + REPO_URL + '" id="st-about-link">github.com/Muzi2333/personal-workbench</a></div>',
-      '    </div>',
+      '  <div class="settings-search-results" id="st-sres" style="display:none"></div>',
+      '  <div class="settings-body" id="st-body">',
+      tab === 'rest' ? restTabHtml() : tab === 'app' ? appTabHtml(s) : generalTabHtml(),
       '  </div>',
       '</div>',
     ].join('');
 
-    el.grid.querySelector('#st-back').addEventListener('click', closeSettings);
+    const q = (sel) => el.grid.querySelector(sel);
 
-    el.grid.querySelector('#st-launch').addEventListener('click', (e) => {
-      const b = e.target.closest('button[data-v]');
-      if (!b || b.classList.contains('on')) return;
-      pushHistory();
-      state.settings.launch = b.dataset.v;
-      scheduleSave();
+    q('#st-back').addEventListener('click', closeSettings);
+    q('#st-tabs').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-tab]');
+      if (!b || b.dataset.tab === ui.settingsTab) return;
+      ui.settingsTab = b.dataset.tab;
+      ui.settingsQuery = ''; // 手动切页签时退出搜索
       render();
+      if (el.canvas) el.canvas.scrollTop = 0;
     });
 
-    el.grid.querySelector('#st-labels').addEventListener('click', () => {
-      pushHistory();
-      state.settings.showLabels = !state.settings.showLabels;
-      scheduleSave();
-      render();
-    });
+    /* ------------------------------ 设置项搜索 ------------------------------ */
 
-    // 撤销上限输入框：宽度跟随内容长度变化（ch 计字符 + 固定 16px 内边距）
-    const undoInput = el.grid.querySelector('#st-undo');
-    const fitUndo = (inp) => {
-      const n = Math.max(2, String(inp.value).length + 2);
-      inp.style.width = 'calc(' + n + 'ch + 16px)';
-    };
-    fitUndo(undoInput);
-    undoInput.addEventListener('input', () => fitUndo(undoInput));
-    undoInput.addEventListener('change', (e) => {
-      const v = Math.max(0, Math.min(1000, Number(e.target.value) || 0));
-      e.target.value = String(v);
-      fitUndo(e.target);
-      if (v === state.settings.undoLimit) return;
-      pushHistory();
-      state.settings.undoLimit = v;
-      while (history.length > v) history.shift();
-      scheduleSave();
-      toast('撤销上限已设为 ' + v + ' 条', 'ok');
-    });
-
-    el.grid.querySelector('#st-import').addEventListener('click', async () => {
-      const res = await api.importData();
-      if (!res || !res.ok) {
-        if (res && res.error) toast(res.error, 'err');
+    // 有搜索词时用结果列表替换页签内容；支持包含 / 全拼 / 首拼 / 英文首字母 / 子序列模糊
+    const paintSettingsSearch = () => {
+      const res = q('#st-sres');
+      const body = q('#st-body');
+      if (!res || !body) return;
+      const query = trim(ui.settingsQuery).toLowerCase();
+      if (!query) {
+        res.style.display = 'none';
+        body.style.display = '';
         return;
       }
-      const next = normalize(res.data);
-      if (!next) { toast('配置文件格式不正确', 'err'); return; }
-      state = next;
-      ui.activeCell = firstCellKey();
-      updateLockBtn();
-      scheduleSave();
-      render();
-      requestIcons();
-      toast('配置已导入', 'ok');
+      const compact = compactQuery(query);
+      const hits = SETTINGS_INDEX.filter((it) => matchSetting(it, query, compact));
+      body.style.display = 'none';
+      res.style.display = '';
+      res.innerHTML = hits.length
+        ? '<div class="set-group">' + hits.map((h) =>
+            '<div class="set-row st-hit" data-sid="' + h.id + '">' +
+            '  <div class="set-label">' + h.name + '<span class="set-desc">' + h.desc + '</span></div>' +
+            '  <span class="st-hit-tab">' + SETTINGS_TAB_NAME[h.tab] + '</span>' +
+            '</div>').join('') + '</div>'
+        : '<div class="set-group"><div class="set-row"><div class="set-label" style="color:var(--dim-2)">没有匹配的设置项</div></div></div>';
+    };
+
+    const stSearch = q('#st-search');
+    stSearch.value = ui.settingsQuery || '';
+    stSearch.addEventListener('input', () => {
+      ui.settingsQuery = stSearch.value;
+      paintSettingsSearch();
     });
-
-    el.grid.querySelector('#st-export').addEventListener('click', async () => {
-      const res = await api.exportData(state);
-      if (res && res.ok) toast('已导出到 ' + res.path, 'ok');
-      else if (res && res.error) toast(res.error, 'err');
+    stSearch.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault();
+        const first = el.grid.querySelector('#st-sres .st-hit');
+        if (first) jumpToSetting(first.dataset.sid);
+      } else if (e.key === 'Escape' && stSearch.value) {
+        // 有内容时先清空搜索，不冒泡触发「关闭设置页」
+        e.stopPropagation();
+        stSearch.value = '';
+        ui.settingsQuery = '';
+        paintSettingsSearch();
+      }
     });
+    q('#st-sres').addEventListener('click', (e) => {
+      const row = e.target.closest('.st-hit');
+      if (row) jumpToSetting(row.dataset.sid);
+    });
+    if (ui.settingsQuery) paintSettingsSearch();
 
-    el.grid.querySelector('#st-datadir').addEventListener('click', () => api.openDataDir());
+    /* -------------------------------- 通用页 -------------------------------- */
 
-    el.grid.querySelector('#st-reset').addEventListener('click', () => {
-      confirmDialog('恢复默认布局？', '当前配置会被替换，可 Ctrl+Z 撤销。', '恢复', () => {
-        pushHistory();
-        state = defaults();
+    const importBtn = q('#st-import');
+    if (importBtn) {
+      importBtn.addEventListener('click', async () => {
+        const res = await api.importData();
+        if (!res || !res.ok) {
+          if (res && res.error) toast(res.error, 'err');
+          return;
+        }
+        const next = normalize(res.data);
+        if (!next) { toast('配置文件格式不正确', 'err'); return; }
+        state = next;
         ui.activeCell = firstCellKey();
-        ui.settingsOpen = false;
         updateLockBtn();
         scheduleSave();
         render();
         requestIcons();
+        toast('配置已导入', 'ok');
       });
-    });
+    }
+
+    const exportBtn = q('#st-export');
+    if (exportBtn) {
+      exportBtn.addEventListener('click', async () => {
+        const res = await api.exportData(state);
+        if (res && res.ok) toast('已导出到 ' + res.path, 'ok');
+        else if (res && res.error) toast(res.error, 'err');
+      });
+    }
+
+    const dirBtn = q('#st-datadir');
+    if (dirBtn) dirBtn.addEventListener('click', () => api.openDataDir());
+
+    const resetBtn = q('#st-reset');
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => {
+        confirmDialog('恢复默认布局？', '当前布局配置会被替换，可 Ctrl+Z 撤销。休息提醒配置不受影响。', '恢复', () => {
+          pushHistory();
+          state = defaults();
+          ui.activeCell = firstCellKey();
+          ui.settingsOpen = false;
+          updateLockBtn();
+          scheduleSave();
+          render();
+          requestIcons();
+        });
+      });
+    }
 
     // 关于区块：开源地址点击走系统浏览器；版本号从主进程取
-    const aboutLink = el.grid.querySelector('#st-about-link');
+    const aboutLink = q('#st-about-link');
     if (aboutLink) {
       aboutLink.addEventListener('click', (e) => {
         e.preventDefault();
         api.launch({ target: REPO_URL });
       });
     }
-    const aboutVer = el.grid.querySelector('#st-about-ver');
+    const aboutVer = q('#st-about-ver');
     if (aboutVer) {
       Promise.resolve(api.appVersion()).then((v) => {
         if (v) aboutVer.textContent = 'v' + v;
       }).catch(() => {});
     }
+
+    /* -------------------------------- 应用页 -------------------------------- */
+
+    const launchSeg = q('#st-launch');
+    if (launchSeg) {
+      launchSeg.addEventListener('click', (e) => {
+        const b = e.target.closest('button[data-v]');
+        if (!b || b.classList.contains('on')) return;
+        pushHistory();
+        state.settings.launch = b.dataset.v;
+        scheduleSave();
+        render();
+      });
+    }
+
+    const labelsBtn = q('#st-labels');
+    if (labelsBtn) {
+      labelsBtn.addEventListener('click', () => {
+        pushHistory();
+        state.settings.showLabels = !state.settings.showLabels;
+        scheduleSave();
+        render();
+      });
+    }
+
+    // 撤销上限输入框：宽度跟随内容长度变化（ch 计字符 + 固定 16px 内边距）
+    const undoInput = q('#st-undo');
+    if (undoInput) {
+      const fitUndo = (inp) => {
+        const n = Math.max(2, String(inp.value).length + 2);
+        inp.style.width = 'calc(' + n + 'ch + 16px)';
+      };
+      fitUndo(undoInput);
+      undoInput.addEventListener('input', () => fitUndo(undoInput));
+      undoInput.addEventListener('change', (e) => {
+        const v = Math.max(0, Math.min(1000, Number(e.target.value) || 0));
+        e.target.value = String(v);
+        fitUndo(e.target);
+        if (v === state.settings.undoLimit) return;
+        pushHistory();
+        state.settings.undoLimit = v;
+        while (history.length > v) history.shift();
+        scheduleSave();
+        toast('撤销上限已设为 ' + v + ' 条', 'ok');
+      });
+    }
+
+    /* -------------------------------- 休息页 -------------------------------- */
+
+    if (tab !== 'rest') return;
+
+    paintRestStatus(restStatus);
+    refreshRestStatus();
+    restStatusTimer = setInterval(refreshRestStatus, 1000);
+
+    const enabledBtn = q('#st-rest-enabled');
+    enabledBtn.addEventListener('click', () => {
+      const next = !restConfig.enabled;
+      restConfig.enabled = next;
+      enabledBtn.classList.toggle('on', next);
+      saveRestConfig({ enabled: next }, true);
+      toast(next ? '已开启电脑休息提醒' : '已关闭电脑休息提醒', 'ok');
+    });
+
+    const fitNum = (inp) => {
+      const n = Math.max(2, String(inp.value).length + 2);
+      inp.style.width = 'calc(' + n + 'ch + 16px)';
+    };
+
+    const bindRestNumber = (selector, key, min, max) => {
+      const inp = q(selector);
+      if (!inp) return;
+      fitNum(inp);
+      inp.addEventListener('input', () => fitNum(inp));
+      inp.addEventListener('change', () => {
+        const v = Math.max(min, Math.min(max, Math.round(Number(inp.value) || REST_FALLBACK[key])));
+        inp.value = String(v);
+        fitNum(inp);
+        if (Number(restConfig[key]) === v) return;
+        saveRestConfig({ [key]: v }, true);
+      });
+    };
+
+    bindRestNumber('#st-rest-free', 'free_minutes', 1, 120);
+    bindRestNumber('#st-rest-work', 'work_minutes', 1, 480);
+    bindRestNumber('#st-rest-countdown', 'countdown_minutes', 1, 120);
+    bindRestNumber('#st-rest-force', 'force_rest_minutes', 1, 120);
+
+    const modeSeg = q('#st-rest-mode');
+    modeSeg.addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-v]');
+      if (!b || b.classList.contains('on')) return;
+      restConfig.screen_saver_mode = b.dataset.v;
+      Array.from(modeSeg.querySelectorAll('button[data-v]')).forEach((btn) => {
+        btn.classList.toggle('on', btn === b);
+      });
+      saveRestConfig({ screen_saver_mode: b.dataset.v }, true);
+      paintRestStatus(restStatus);
+      toast(b.dataset.v === 'mode2' ? '已切换为系统锁屏模式' : '已切换为自绘全屏模式', 'ok');
+    });
+
+    const pwInput = q('#st-rest-password');
+    // 宽度跟随内容（同撤销上限）：密码字符与明文都按 ch 估算，留足 letter-spacing 与内边距
+    const fitPw = () => {
+      const n = Math.min(26, Math.max(6, String(pwInput.value || '').length + 3));
+      pwInput.style.width = 'calc(' + n + 'ch + 24px)';
+    };
+    fitPw();
+    let pwTimer = null;
+    const persistPassword = () => {
+      const v = String(pwInput.value || '');
+      if (!v) {
+        pwInput.value = String(restConfig.exit_password || '');
+        fitPw();
+        toast('退出密码不能为空', 'err');
+        return;
+      }
+      if (v === restConfig.exit_password) return;
+      saveRestConfig({ exit_password: v }, true);
+    };
+    pwInput.addEventListener('input', () => {
+      fitPw();
+      clearTimeout(pwTimer);
+      pwTimer = setTimeout(persistPassword, 600);
+    });
+    pwInput.addEventListener('change', () => {
+      clearTimeout(pwTimer);
+      persistPassword();
+    });
+
+    const showPw = q('#st-rest-showpw');
+    showPw.addEventListener('change', () => {
+      ui.restShowPassword = showPw.checked;
+      pwInput.type = showPw.checked ? 'text' : 'password';
+      fitPw();
+    });
   }
 
   /* -------------------------------- 全局搜索 -------------------------------- */
@@ -2032,6 +2491,15 @@
     size.value = String(state.settings.iconSize || 54);
 
     // 应用图标大小：滑块和 Ctrl+滚轮共用
+    let sizeTipTimer = null;
+    function showSizeTip(v) {
+      const tip = $('size-tip');
+      if (!tip) return;
+      tip.textContent = v + 'px';
+      tip.classList.add('show');
+      clearTimeout(sizeTipTimer);
+      sizeTipTimer = setTimeout(() => tip.classList.remove('show'), 900);
+    }
     function applyIconSize(raw) {
       const v = Math.min(76, Math.max(36, Math.round(raw)));
       state.settings.iconSize = v;
@@ -2042,6 +2510,7 @@
         p.rows.forEach((r) => { r.height = side; });
         p.cols.forEach((c) => { c.width = side; });
       });
+      showSizeTip(v);
       scheduleSave();
       render();
     }
@@ -2368,6 +2837,10 @@
     render();
     requestIcons();
 
+    // 标题栏居中展示休息提醒状态（订阅 + 首帧轮询）
+    restApi.getStatus().then(paintTbRest).catch(() => {});
+    restApi.onStatus(paintTbRest);
+
     if (!isElectron) {
       toast('浏览器预览模式：可以体验排版，启动本地程序需用 Electron 运行', 'err');
     }
@@ -2375,3 +2848,4 @@
 
   boot();
 })();
+

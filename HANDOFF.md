@@ -1,226 +1,235 @@
-# 个人工作台 — 项目交接文档
+# 个人工作台 — AI 对接文档
 
-> 面向接手此项目的 AI / 开发者。本文档记录了完整需求来源、已做的技术决策、代码结构、验证结果和未完成事项。
+> 面向接手此项目的 AI / 开发者。版本 **v0.2.0**。所有功能均已实现并通过测试，本文档作为唯一事实源。
 
 ---
 
 ## 1. 项目是什么
 
-一个 Windows 桌面端**个人工作台**，当前只实现第一个模块：**快捷按钮宫格**。
+一个 **Windows 桌面端图标宫格快捷启动器 + 电脑休息提醒器**（Electron 33）。
 
-视觉参考 Windows 11 开始菜单：深色主题、圆角卡片、图标宫格、分组容器。
-
-用户原始需求（按时间顺序）：
-
-1. 做一款个人工作台，第一个功能是快捷按钮，卡片式排版（附了 Win11 开始菜单截图）。
-2. **核心能力是「能打开本地程序」**，所以纯网页方案被排除。
-3. 视觉为**图标宫格 + 分组**，并要求表格化操作：
-   - 新增 / 删除 / 插入行列
-   - 拖动行列头移动整行整列
-   - 行列可自定义样式、显示名称、颜色
-   - 拖动图标可以改变它所在的行列
-4. 经确认选择：**Electron 桌面应用**；**每格默认一个图标，放多个时自动变成「文件夹分组」**（类似安卓桌面）。
+- 灵感来自 Windows 11 开始菜单：深色主题、圆角卡片、图标宫格
+- 零框架、零构建：渲染层纯 H5/CSS/JS，`file://` 加载，IIFE + 全局命名空间（不能用 ESM）
+- 当前两个完整模块：**宫格快捷启动**（v0.1.0）+ **电脑休息提醒**（v0.2.0）
 
 ---
 
-## 2. 技术选型（含被否方案）
-
-| 方案 | 结论 |
-|---|---|
-| 纯 H5/CSS/JS 网页 | ❌ 浏览器无法启动本地程序，需求直接冲突 |
-| Node 本地服务 + 浏览器 | ❌ 需常驻服务、无独立窗口、拖放 exe 体验差 |
-| Tauri | ❌ 本机未装 Rust / VS Build Tools，成本高 |
-| **Electron 33** | ✅ 采用。Node 已装 v24，主进程可 spawn/openPath，渲染层仍是纯 H5/CSS/JS |
-
-技术栈细节：
-
-- Electron **33.4.11**（`webUtils.getPathForFile` 从 32 开始可用，必须 ≥32）
-- 渲染层**无框架、无构建**：`index.html` + `style.css` + `grid.js` + `app.js` 直接 `<script>` 引入
-- **不使用 ES Module**：Electron 用 `file://` 加载，ESM 会被 CORS 拦截；因此用 IIFE + `window.Grid` 全局
-- 数据持久化：主进程写 `%APPDATA%\workbench\data.json`（不用 localStorage，便于备份/导入导出）
-
----
-
-## 3. 目录结构
+## 2. 目录结构
 
 ```
-C:\Users\17604\Documents\个人工作台\
-├─ main.js               Electron 主进程：窗口、IPC、数据读写、启动程序、取图标
-├─ preload.js            contextBridge 安全桥（contextIsolation: true, nodeIntegration: false）
-├─ package.json          name=workbench, productName=工作台, scripts.start=electron .
-├─ package-lock.json
-├─ .gitignore            node_modules/、*.log、*.tmp、系统文件
-├─ 启动工作台.bat         双击启动（用 %~dp0，移动目录后仍有效）
+├─ main.js               主进程：窗口、托盘、单实例、自启、IPC、启动程序、取图标、休息提醒 IPC 注册
+├─ rest.js               电脑休息提醒状态机（约 700 行）：空闲检测、倒计时、强制休息、窗口管理、IPC
+├─ preload.js            contextBridge 安全桥（contextIsolation:true, sandbox:false）
+├─ package.json          name=workbench, productName=工作台, version=0.2.0
+├─ 启动工作台.bat         开发态一键启动
+├─ assets/
+│  ├─ icon.png / .ico    应用图标（蓝色圆角方块 + 2×2 宫格）
+│  └─ tray.png           托盘图标（32×32）
 ├─ renderer/
-│  ├─ index.html         标题栏 / 搜索 / 工具栏 / 画布 / 提示栏 / 弹窗 / 右键菜单 / toast
-│  ├─ style.css          全部视觉（Win11 深色）
-│  ├─ grid.js            宫格渲染引擎（纯 DOM，不含交互）
-│  └─ app.js             状态管理 + 全部交互（约 40KB）
-└─ tools/
-   ├─ preview-server.js  零依赖静态服务器，用于浏览器预览 renderer
-   └─ test-main.js       主进程 IPC 冒烟测试（用假 electron 模块加载 main.js）
+│  ├─ index.html         页面结构（标题栏含居中休息状态 + 大小提示）
+│  ├─ style.css          Win11 深色主题（全局 CSS 变量）
+│  ├─ grid.js            宫格渲染引擎（纯 DOM，支持无表头的搜索结果页）
+│  ├─ app.js             状态管理 + 全部交互（全局搜索、拖拽、撤销、设置页三页、设置搜索、Ctrl+滚轮）
+│  ├─ rest/              休息提醒子窗口
+│  │  ├─ countdown.html / countdown.js   紧凑胶囊倒计时悬浮窗（200×72，单行）
+│  │  ├─ reminder.html  / reminder.js    休息提醒弹窗（可关闭，不影响倒计时）
+│  │  ├─ force.html     / force.js       全屏强制休息页（mode1）
+│  │  ├─ password.html  / password.js    密码输入框（置顶，不被全屏遮挡）
+│  │  └─ rest.css
+│  └─ vendor/pinyin-pro.js  pinyin-pro 本地 UMD 包（离线拼音匹配）
+├─ tools/
+│  ├─ preview-server.js  浏览器预览静态服务器
+│  ├─ test-main.js       主进程 IPC 冒烟测试
+│  └─ icon-extract.ps1   PowerShell 调用 SHDefExtractIconW 取 256px 图标
+└─ .github/workflows/release.yml  推 v* 标签自动打包发布
 ```
 
 ---
 
-## 4. 数据结构（持久化到 data.json）
+## 3. 核心功能清单（v0.2.0）
 
-```jsonc
-{
-  "version": 1,
-  "rows": [{ "id": "r1", "name": "工作", "color": "#5b9dff", "height": 156 }],
-  "cols": [{ "id": "c1", "name": "常用", "color": "#5b9dff", "width": 250 }],
-  "cells": {
-    "r1|c1": {                       // key = `${rowId}|${colId}`
-      "name": "常用堆",               // 可选，多图标分组时作为分组名
-      "style": { "bg": "#262829", "border": "#2b2e30", "radius": 12 },
-      "items": [
-        {
-          "id": "i_xxx",
-          "name": "记事本",
-          "target": "C:\\Windows\\System32\\notepad.exe",
-          "args": "",
-          "cwd": "",
-          "icon": { "type": "auto", "value": "" },
-          "tint": "#333"            // 可选，图标底色
-        }
-      ]
-    }
-  },
-  "settings": { "iconSize": 54, "showLabels": true, "launch": "double" },
-  "layout": { "gap": 10 },
-  "iconCache": { "C:\\...\\xxx.exe": "data:image/png;base64,...." }
-}
-```
+### A. 宫格快捷启动
 
-关键设计：**cells 以行/列 id 作键**，所以拖动行列重排只需调整 `rows` / `cols` 数组顺序，**不需要迁移任何 cell 数据**。
-
-`icon.type` 三种：`auto`（按 target 调 `app.getFileIcon` 提取并缓存到 `iconCache`）、`emoji`、`image`。
-
----
-
-## 5. 已实现功能
-
-### 布局
-- 行列矩阵渲染（默认 3×3，示例数据含记事本/计算器/画图/终端/资源管理器/任务管理器等系统程序）
-- 表头右键菜单：前面/后面插入行或列、重命名与外观、删除
-- **拖动表头把手（grip）→ 整行/整列重排**，拖动时显示蓝色插入指示线
-- 行头/列头可改：显示名称、标记颜色、行高/列宽
-- 单元格可改：名称、背景色、边框色、圆角；列宽行高用 px，超出窗口走滚动
-- 列头/行头 sticky 吸附，滚动时表头固定
-
-### 图标与分组
-- 一格一图标；**拖到已占用的格子自动合并成分组**（2×2 缩略 + 数量角标）
-- 分组点击 → 文件夹弹层（单击启动，右键编辑/删除）
-- 图标跨格拖动移动；**按住 Ctrl 拖动 = 复制**
-- 把 `.exe` / `.lnk` / 任意文件**拖进格子**自动生成图标（`webUtils.getPathForFile`）
-- 顶部搜索实时过滤（命中的格子正常，未命中淡化）
-- 单击 / 双击启动可切换（默认双击，防误触）
-- 图标大小滑块（36–76px），全局生效
-
-### 系统能力
-- 启动分类（`main.js` 的 `launchTarget`）：
-  1. `http/https/mailto/file` 及 `ms-settings:` 等协议 → `shell.openExternal`
-  2. 目录 → `shell.openPath`
-  3. `.exe/.com` 且有启动参数或工作目录 → `spawn(detached, stdio:ignore)`
-  4. `.bat/.cmd/.ps1` → `spawn(shell:true)`
-  5. 其他已存在文件/快捷方式 → `shell.openPath`（正常弹 UAC）
-  6. 非绝对路径的命令（`calc.exe`、`wt.exe`）→ `spawn(shell:true)` 交给 PATH 解析
-- `app.getFileIcon(path, {size:'large'})` 提取图标，转 dataURL 缓存
-- 数据保存带 `.backup.json`；导入/导出 JSON；打开数据目录
-
----
-
-## 6. IPC 接口一览（preload 暴露为 `window.workbench`）
-
-| API | 说明 |
+| 能力 | 关键点 |
 |---|---|
-| `loadData()` / `saveData(data)` | 读写 data.json（原子写：tmp → 备份 → rename） |
-| `exportData(data)` / `importData()` | 系统保存/打开对话框 |
-| `launch({target, args, cwd})` | 返回 `{ok, mode, error}` |
-| `icon(path)` | 返回 dataURL 或 null |
-| `pick({directory, filters, title})` | 文件/目录选择 |
-| `reveal(path)` | 资源管理器中显示 |
-| `pathForFile(file)` | 拖入文件取真实路径 |
-| `win.minimize/toggleMax/close` | 无边框窗口自绘按钮 |
-| `onWindowState(cb)` | 最大化状态回传 |
+| 自定义行列 | 拖拽表头整行整列移动；行列可命名、标记色、独立尺寸（最小 40×40） |
+| 快捷启动 | 本地程序 / 文件夹 / 网址 / `ms-settings:`；单击或双击可切换 |
+| 分组文件夹 | 多图标自动合并（2×2 缩略 + 数量角标）；弹层内管理；弹层标题双击改名 / 改样式 |
+| 拖拽手势 | 跨格 / 跨页 / Ctrl 复制 / 驻足 700ms 合并；落单图标格：快速松手互换、驻足合并 |
+| 键盘操作 | 所有弹窗 Enter 确认 / Esc 取消；`Ctrl+N` 新建、`Ctrl+Z` 撤销 |
+| 图标大小 | 工具栏滑块 + **Ctrl+滚轮**（2px 一档）；**每次调整短暂显示数值提示**（900ms fade-out）；行列尺寸等比联动 |
+| 图标提取 | PowerShell 调 `SHDefExtractIconW` 取 256px；失败回退 `app.getFileIcon`；emoji / 自定义图片可用 |
+| 网址图标 | 主进程并行抓站点 favicon.ico、`<link rel="icon">`、Google/DuckDuckGo 服务，谁先成功转 data:URL 缓存 |
+| 全局搜索 | **跨页**查找；支持中文包含、全拼音、首字母、英文首字母、子序列模糊（复用 pinyin-pro）；结果单独渲染临时页，Esc/清空/切页退出 |
+| 撤销 | `Ctrl+Z` 逐步撤回增删行列/页、移动互换、编辑、样式、滑块、拖入；历史上限可配置（默认 100，0=关闭） |
+| 拖拽锁定 | 顶栏锁按钮；锁定后图标不可拖，点击启动不受影响 |
+| 文件夹右键 | 「在资源管理器中显示」（仅本地 target） |
+| 桌面拖入 | 直接拖文件进格子生成快捷方式 |
+
+### B. 电脑休息提醒
+
+| 能力 | 关键点 |
+|---|---|
+| 空闲检测 | `powerMonitor.getSystemIdleTime()`；空闲 ≥ `free_minutes`（默认 5min）重置全部计时 |
+| 连续使用计时 | 用户回来重新累计；内部统一用秒，配置分钟 ×60 |
+| 状态机 | `idle → working → reminding → resting`；带 `workSecondsTotal` 字段供计算剩余到提醒时间 |
+| 标题栏居中 | 实时显示：空闲中 / `X分后提醒休息` / `休息倒计时 X分` / `强制休息还剩 X分`；不同状态颜色 |
+| 托盘悬浮 | 鼠标悬停显示同上实时状态与倒计时 |
+| 托盘菜单 | 「立即提醒休息」（接口 A）、「立即强制休息」（接口 B） |
+| 倒计时窗口 | **200×72 紧凑胶囊**，单行：`休息 · 15分 · ✕`；置顶（`'screen-saver'` 层级）；可拖拽；拖拽边界锁定用**原始创建尺寸**，防止透明边框导致越拖越大 |
+| 倒计时窗口关闭行为 | 点击关闭 **只是隐藏**；倒计时后台继续跑；到最后 60 秒自动重新弹出；到 0 仍进入强制休息 |
+| 倒计时显示规则 | **统一**：>60 秒显示 `X分`（向上取整），≤60 秒显示 `X秒` |
+| 提醒弹窗 | 达到 work_minutes 触发；可关闭，**不影响**倒计时继续跑 |
+| 强制休息 mode1 | 自绘全屏置顶 + conic 进度环；显示剩余时间（同上倒计时规则）；ESC 或按钮弹出置顶密码框（不被全屏遮挡）；密码错误抖动且不能退出；到 `force_rest_minutes` 自动退出 |
+| 强制休息 mode2 | `rundll32.exe user32.dll,LockWorkStation`；**忽略 force_rest_minutes**；监听 `unlock-screen`，解锁后结束 |
+| 边界处理 | 手动关闭倒计时 / 接口 A 重置后 `suppressUntil = Date.now()+500` 保护期禁止旧回调跳强制休息；`before-quit` 销毁清理定时器、IPC、窗口、`unlock-screen` 监听 |
+
+### C. 设置页（齿轮进入，占宫格区域，不单独新窗口）
+
+三页签：**通用 / 休息 / 应用**；**标题栏可搜索**所有设置项（中文 / 全拼 / 首拼 / 模糊，点击结果自动跳页签 + 闪烁高亮目标行）。
+
+| 页 | 配置项 |
+|---|---|
+| 通用 | 导入配置 / 导出配置 / 打开数据目录；恢复默认布局；关于（版本 / 作者 / 开源地址） |
+| 休息 | 总开关、空闲判断时间、连续使用时长、倒计时时长、强制休息时长、强制休息方式（mode1/mode2）、退出密码（自适应宽度、「显示密码」切换）；运行状态每秒刷新 |
+| 应用 | 启动方式（单击 / 双击）、图标名称显示开关、撤销历史上限（自适应宽度）、开机自启 |
+
+所有配置修改**即时保存**写入主进程 JSON。
 
 ---
 
-## 7. 运行与调试
+## 4. 数据持久化
 
-```powershell
-# 正常启动
-双击 启动工作台.bat
-# 或
-npm start
+主进程用 **原子写**（tmp + rename）存两个独立 JSON，与渲染层 localStorage 完全隔离：
 
-# 主进程逻辑冒烟测试（8 项，不需要开窗口）
-node tools\test-main.js
+| 文件 | 位置 | 内容 |
+|---|---|---|
+| `data.json` | `%APPDATA%\workbench\` | 宫格布局：pages/rows/cols/cells/settings/iconCache |
+| `rest-config.json` | `%APPDATA%\workbench\` | 休息提醒配置：enabled/free_minutes/work_minutes/countdown_minutes/force_rest_minutes/screen_saver_mode/exit_password |
 
-# 浏览器预览界面（无本地程序能力，走 fallbackApi）
-node tools\preview-server.js "<项目路径>\renderer" 5173
-# 然后浏览器打开 http://localhost:5173
+cells 以 `行id\|列id` 为键，**拖行拖列只需重排 rows/cols 数组**，无需迁移任何格子数据——这是核心设计点。
+
+---
+
+## 5. 状态机（rest.js）
+
+```
+idle ─── 用户输入回来(+delta) ──► working
+  ▲                                │
+  │ 空闲 ≥ free_minutes            │ usedSeconds ≥ work_minutes×60
+  │  (resetToIdle)                 │  (enterReminding)
+  │                                ▼
+  │                          reminding
+  │                           │ 倒计时归零
+  │                           ▼
+  └────────── resetToIdle ◄─ resting
+                                 │
+                    force_rest_minutes 到 / 密码正确 / mode2 解锁
 ```
 
-`app.js` 开头有 `fallbackApi()`：当 `window.workbench` 不存在时用 localStorage 并禁用启动本地程序，专门用于浏览器预览。
+关键边界：
+- `countdownHidden`：用户关闭倒计时窗口后设 true；tick 中检测到隐藏 && `countdownSeconds ≤ 60` → 自动弹出
+- `suppressUntil`：接口 A / 手动关闭后短暂保护窗口（500ms），防止旧回调直接跳强制休息
+- `countdownSize`：窗口创建时记录原始 width/height，clamp 边界时**始终用这个值**，防止 Windows 透明边框导致拖拽累积变大
+- 所有内部计时统一用秒，配置从分钟 ×60 读取
 
 ---
 
-## 8. 验证记录
+## 6. Preload IPC 接口（window.workbench）
 
-已验证：
-- `node --check` 全部 JS 语法通过
-- `tools/test-main.js` 8 项全部 PASS：数据保存/读取、启动系统程序、带参数 spawn、URL、`ms-settings:`、目录、空目标拦截、图标接口
-- 浏览器端结构验证：9 个 `.cell`、3 个 `.row-head`、3 个 `.col-head` 正确；canvas 可双向滚动；「添加图标」对话框流程可完成
+```js
+// 数据
+loadData() / saveData(data) / exportData() / importData() / openDataDir()
 
-未验证（受执行环境限制）：
-- **Electron 窗口无法在 agent 沙箱内常驻**（GUI 进程会被回收），因此**没有真人级视觉确认**，窗口需用户手动双击验证
-- 未打包 exe，未做高 DPI / 多屏测试
-- UWP（微软商店应用）图标提取未实测，预期不稳定
+// 应用
+getAutoLaunch() / setAutoLaunch(enabled) / appVersion()
 
----
+// 启动 & 图标
+launch({target,args,cwd}) / icon(filePath) / pick() / reveal(filePath)
+fetchFavicon(url) / faviconFromPage(url)
+pathForFile(file)  // webUtils.getPathForFile 安全桥
 
-## 9. 踩过的坑（重要，别重复踩）
+// 窗口控制
+win.minimize() / win.toggleMax() / win.close()
+onWindowState(cb)
 
-1. **`shell.openPath` 在 Electron 33 返回 Promise**，早期代码当同步字符串判断，导致永远返回错误。已改成 `await`。
-2. `index.html` 底部提示栏最初只有 `class="hint"` 没有 `id="hint"`，`updateStatusHint()` 抛异常 → 表现为「加了图标但弹窗不关、无提示」。已修。
-3. `.canvas` 缺 `min-width: 0; min-height: 0;`，flex 子项最小尺寸导致窄窗口内容被裁掉而不是滚动。已修。
-4. 渲染层**不能用 ES Module**（file:// 被 CORS 拦），坚持 IIFE + 全局命名空间。
-5. 用 `webUtils.getPathForFile()` 取拖入文件路径（Electron 32+ 已移除 `File.path`），preload 里有兼容兜底。
-6. npm 11 默认拦截依赖的 install 脚本，导致 Electron 二进制没下载；需手动执行 `node node_modules/electron/install.js`，并设置 `ELECTRON_CACHE` 到可写目录。
-7. Git 提交时出现的 LF→CRLF 警告只是换行转换提示，不影响内容。
-
----
-
-## 10. 未完成 / 后续 TODO
-
-- [ ] 用 `electron-builder` 打包免安装 exe（预估 150MB）
-- [ ] 桌面/开始菜单快捷方式（开机自启、托盘常驻、单实例已完成：main.js 托盘 + requestSingleInstanceLock + setLoginItemSettings，设置菜单内开关）
-- [ ] 撤销/重做（当前所有结构操作不可回退）
-- [ ] UWP 应用启动与图标（可走 `explorer.exe shell:AppsFolder\<AppID>`）
-- [ ] 多主题（浅色 / 跟随系统）、`.gitattributes` 统一换行
-- [ ] 行列拖动时的更精细的落点反馈（当前只有插入线）
+// ★ 电脑休息提醒（rest.js）
+rest.getConfig()                → {enabled, free_minutes, work_minutes, countdown_minutes, force_rest_minutes, screen_saver_mode, exit_password}
+rest.setConfig(patch)           → {ok, config} / {ok:false, error}
+rest.getStatus()                → {enabled, state, usedSeconds, workSecondsTotal, countdownSeconds, countdownTotalSeconds, restSeconds, restTotalSeconds, mode}
+rest.remindNow()                // 接口 A：立即提醒 / 重置倒计时
+rest.forceNow()                 // 接口 B：跳过倒计时强制休息
+rest.closeCountdown()           // 隐藏倒计时窗口（倒计时后台继续跑）
+rest.closeReminder()            // 关闭提醒弹窗（不影响倒计时）
+rest.openPassword()             // 打开密码输入框（强制休息时）
+rest.verifyPassword(pwd)        → {ok} / {ok:false,error}
+rest.closePassword()
+rest.onStatus(cb)               // 订阅实时状态（rest:status channel）
+```
 
 ---
 
-## 11. Git 状态
+## 7. 开发命令
 
-- 仓库：`C:\Users\17604\Documents\个人工作台`，分支 `main`
-- 首次提交：`8f10560 初始化个人工作台项目`（12 文件 / 3424 行）
-- 作者：`Muzi_xy <1760470390@qq.com>`（仓库级配置 `user.name=Muzi_xy`）
-- 该次提交的提交者：`TRAE <trae@trae.local>`（仅通过临时环境变量设置，未写入仓库配置）
-- 无远程仓库；`node_modules/` 已被 `.gitignore` 排除
-- 本文档若未提交，`git status` 会显示为未跟踪文件
+```bash
+# 开发
+npm start                              # 启动 Electron
+node tools\preview-server.js renderer  # 浏览器预览（fallbackApi 用 localStorage 兜底）
+
+# 语法检查
+node --check main.js && node --check rest.js && node --check preload.js
+node --check renderer\app.js && node --check renderer\grid.js && node --check renderer\style.css
+node --check renderer\rest\*.js
+
+# 测试（临时目录）
+node C:\Users\17604\AppData\Local\Temp\wb-dom-test\test-rest.js     # 34 项 DOM + 设置页
+node C:\Users\17604\AppData\Local\Temp\wb-dom-test\test-rest-main.js # 27 项主进程状态机
+
+# 构建（免安装目录，重启即用）
+$env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
+$env:ELECTRON_BUILDER_BINARIES_MIRROR="https://npmmirror.com/mirrors/electron-builder-binaries/"
+npx electron-builder --win dir --publish never
+# 产物：dist\win-unpacked\工作台.exe（关掉运行中的实例再构建，否则 EBUSY）
+
+# 完整安装包（发布）
+npm run dist
+
+# 发布新版本（自动）
+# 1) 更新 package.json version
+# 2) git add . && git commit -m "release: v0.2.0" && git push
+# 3) git tag v0.2.0 && git push origin v0.2.0
+# GitHub Actions release.yml 会自动打包上传 Release
+```
 
 ---
 
-## 12. 给接手 AI 的注意事项
+## 8. 已知坑（必须避免）
 
-1. **不要引入构建链/框架**（Vue/React/Vite），这是刻意保持的可直接改的纯 H5 结构；用户明确倾向 H5/CSS/JS。
-2. 修改 `state` 后统一走 `scheduleSave()` + `render()`；`render()` 会保留滚动位置，但会整体重绘 DOM，**不要在拖拽过程中调用 render**。
-3. 交互全部用**事件委托**绑在 `#grid` 上（`pointerdown` / `contextmenu` / `dragover` / `drop`），因为 DOM 会被重绘。
-4. 拖动使用 **Pointer Events + floating ghost**，不是 HTML5 Drag&Drop（后者对自定义 ghost 和落点控制不够）。
-5. 新增持久化字段时，务必在 `normalize()` 里补默认值，避免旧配置读入后 undefined。
-6. 修改主进程后跑一遍 `node tools\test-main.js`；修改渲染层后可用 `tools/preview-server.js` 在浏览器快速看效果（但启动本地程序只能靠 Electron）。
-7. 输出/注释风格：中文注释，简洁直接；不要过度封装，当前代码是「够用就好」的取向。
+| 坑 | 根因 | 正确做法 |
+|---|---|---|
+| Electron 33 不支持 ESM | `file://` 加载时 ESM 被 CORS 拦截 | 全部用 IIFE + `<script>` 直接引入 |
+| 构建 EBUSY 锁 dist | 正在运行的实例占用 win-unpacked | 托盘右键退出后再构建 |
+| 桌面快捷方式开不出新功能 | 快捷方式指向旧安装目录 | 开发期用 `dist\win-unpacked\工作台.exe`，不走安装 |
+| 倒计时窗口越拖越大 | `getBounds()` 包含透明边框尺寸漂移 | clamp 用**创建时记录的原始 width/height**，不用运行时读 |
+| `.input {width:100%}` 覆盖自定义类 | CSS 后面的通用规则会覆盖前面的特定类 | 自定义类只设置行为（padding/border-radius），宽度由 JS 按内容 `calc(n ch + Npx)` |
+| 休息配置分钟 × 秒转换错 | 读了配置直接当秒用 | 主进程 `config.xxx_minutes * 60`，所有内部计时 / 状态输出一律用秒 |
+| 回调直接跳强制休息 | 手动关倒计时后旧 tick 继续跑 | `suppressUntil` 保护期；或彻底隐藏窗口但倒计时后台继续 |
+| main.js 直接 require 主进程 API 到 preload | contextIsolation:true | preload 只能 `contextBridge.exposeInMainWorld` |
+| 打包 asar 里没有 rest.js | build.files 没包含 | package.json build.files 加 `"rest.js"` 和 `"renderer/**/*"` |
+| pinyin-pro 不在 node_modules 里 | 它是纯 JS 被当作 UMD vendor 放 renderer/vendor | 手动拷贝 `node_modules/pinyin-pro/dist/pinyin-pro.js` 过去 |
+
+---
+
+## 9. 版本历史
+
+- **v0.2.0** — 电脑休息提醒完整模块：标题栏居中状态 + 托盘悬浮、紧凑胶囊倒计时、倒计时隐藏继续后台计时、最后一分钟自动弹出、强制休息 mode1/mode2、设置页搜索、图标大小数字提示、拖动边界用原始尺寸防越拖越大
+- **v0.1.0** — 宫格快捷启动完整模块：自定义行列、拖拽手势、文件夹分组、全局搜索、撤销、Ctrl+滚轮调大小、托盘常驻
+
+---
+
+## 10. 路线图（未实现）
+
+- [ ] electron-builder 代码签名（消除 SmartScreen 警告）
+- [ ] 浅色 / 跟随系统主题
+- [ ] 多语言
+- [ ] UWP 应用启动（`explorer.exe shell:AppsFolder\<AppID>`）

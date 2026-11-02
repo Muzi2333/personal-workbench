@@ -31,4 +31,19 @@ contextBridge.exposeInMainWorld('workbench', {
   },
 
   onWindowState: (cb) => ipcRenderer.on('window:state', (_e, s) => cb(s)),
+
+  // 电脑休息提醒（主进程 rest.js）
+  rest: {
+    getConfig: () => ipcRenderer.invoke('rest:get-config'),
+    setConfig: (patch) => ipcRenderer.invoke('rest:set-config', patch),
+    getStatus: () => ipcRenderer.invoke('rest:get-status'),
+    remindNow: () => ipcRenderer.invoke('rest:remind-now'),
+    forceNow: () => ipcRenderer.invoke('rest:force-now'),
+    closeCountdown: () => ipcRenderer.invoke('rest:countdown-close'),
+    closeReminder: () => ipcRenderer.invoke('rest:reminder-close'),
+    openPassword: () => ipcRenderer.invoke('rest:force-open-password'),
+    verifyPassword: (password) => ipcRenderer.invoke('rest:force-password', password),
+    closePassword: () => ipcRenderer.invoke('rest:force-close-password'),
+    onStatus: (cb) => ipcRenderer.on('rest:status', (_e, s) => cb(s)),
+  },
 });

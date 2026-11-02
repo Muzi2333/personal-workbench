@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>休息提醒</title>
+  <link rel="stylesheet" href="rest.css" />
+</head>
+<body>
+  <div class="reminder-card">
+    <div class="rm-top">
+      <div class="rm-ico">☕</div>
+      <div>
+        <div class="rm-title">该休息一下了</div>
+        <div class="rm-text">你已连续使用电脑 <span class="rm-min" id="rm-min">45</span> 分钟，建议起身活动、放松眼睛。</div>
+      </div>
+    </div>
+    <div class="rm-btns">
+      <button class="btn ghost" id="rm-ok">知道了</button>
+      <button class="btn primary" id="rm-now">立即休息</button>
+    </div>
+  </div>
+  <script src="reminder.js"></script>
+</body>
+</html>

@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn, execFile } = require('child_process');
+const { createRestManager } = require('./rest');
 
 // 任务管理器 / 任务栏分组名（打包后进程名由 exe 文件名决定，这里设置内部名）
 app.setName('工作台');
@@ -10,6 +11,7 @@ app.setAppUserModelId('com.muzi.workbench');
 
 let win = null;
 let tray = null;
+let restManager = null;
 
 const dataFile = () => path.join(app.getPath('userData'), 'data.json');
 const backupFile = () => path.join(app.getPath('userData'), 'data.backup.json');
@@ -41,6 +43,9 @@ function rebuildTrayMenu() {
       rebuildTrayMenu(); // 以真实状态重建，失败时复选框自动回弹
     } },
     { type: 'separator' },
+    { label: '立即提醒休息', click: () => restManager && restManager.remindNow() },
+    { label: '立即强制休息', click: () => restManager && restManager.forceNow() },
+    { type: 'separator' },
     { label: '退出', click: () => { app.isQuitting = true; app.quit(); } },
   ]));
 }
@@ -51,6 +56,30 @@ function createTray() {
   tray.setToolTip('工作台');
   rebuildTrayMenu();
   tray.on('click', showMainWindow);
+}
+
+// 倒计时统一文案：>60 秒显示「X分」（向上取整），≤60 秒显示「X秒」
+function fmtRemain(sec) {
+  const s = Math.max(0, Math.ceil(Number(sec) || 0));
+  return s > 60 ? Math.ceil(s / 60) + '分' : s + '秒';
+}
+
+// 托盘悬浮提示：实时显示休息状态与倒计时
+function updateTrayTip(status) {
+  if (!tray) return;
+  if (!status || !status.enabled) { tray.setToolTip('工作台'); return; }
+  let line = '';
+  if (status.state === 'idle') line = '空闲中';
+  else if (status.state === 'working') {
+    const remain = Math.max(0, (Number(status.workSecondsTotal) || 0) - (Number(status.usedSeconds) || 0));
+    line = fmtRemain(remain) + '后提醒休息';
+  } else if (status.state === 'reminding') line = '休息倒计时 ' + fmtRemain(status.countdownSeconds);
+  else if (status.state === 'resting') {
+    line = status.mode === 'mode2'
+      ? '强制休息中 · 锁屏中'
+      : '强制休息还剩 ' + fmtRemain(status.restSeconds);
+  }
+  tray.setToolTip('工作台 · ' + line);
 }
 
 function createWindow() {
@@ -103,9 +132,20 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     createWindow();
     createTray();
+    restManager = createRestManager({ getMainWindow: () => win, onStatus: updateTrayTip });
+    updateTrayTip(restManager.getStatus());
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
+  });
+
+  // 退出时必须停止休息模块的定时器与系统事件监听，避免后台残留逻辑
+  app.on('before-quit', () => {
+    app.isQuitting = true;
+    if (restManager) {
+      restManager.destroy();
+      restManager = null;
+    }
   });
 
   app.on('window-all-closed', () => {
