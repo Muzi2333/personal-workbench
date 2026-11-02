@@ -192,13 +192,13 @@
         id: r.id || 'r' + (i + 1),
         name: r.name || '行 ' + (i + 1),
         color: r.color || '#5b6b7c',
-        height: Math.max(60, Number(r.height) || 80),
+        height: Math.max(40, Number(r.height) || 80),
       }));
       p.cols = (Array.isArray(p.cols) ? p.cols : []).map((c, i) => ({
         id: c.id || 'c' + (i + 1),
         name: c.name || '列 ' + (i + 1),
         color: c.color || '#5b6b7c',
-        width: Math.max(60, Number(c.width) || 80),
+        width: Math.max(40, Number(c.width) || 80),
       }));
       p.cells = p.cells && typeof p.cells === 'object' ? p.cells : {};
       Object.keys(p.cells).forEach((k) => {
@@ -1518,6 +1518,9 @@
 
   function openDialog(options) {
     el.dialogTitle.textContent = options.title || '';
+    el.dialogTitle.classList.remove('editable-title');
+    el.dialogTitle.title = '';
+    el.dialogTitle.ondblclick = null;
     el.dialogBody.innerHTML = options.body || '';
     el.dialogFoot.innerHTML = '';
 
@@ -1541,6 +1544,8 @@
 
   function closeDialog() {
     el.overlay.classList.add('hidden');
+    el.dialogTitle.classList.remove('editable-title');
+    el.dialogTitle.ondblclick = null;
     el.dialogBody.innerHTML = '';
     el.dialogFoot.innerHTML = '';
   }
@@ -1767,7 +1772,7 @@
         '<input type="color" id="h-color-pick" value="' + (hexOrEmpty(target.color) || '#5b6b7c') + '" style="width:34px;height:32px;padding:0;border:1px solid rgba(255,255,255,.1);border-radius:7px;background:transparent;cursor:pointer">',
         '<input class="input" id="h-color" placeholder="#5b6b7c" spellcheck="false"></div></div>',
         '<div class="field"><label>' + sizeLabel + '</label>',
-        '<input class="input" id="h-size" type="number" min="60" max="600" spellcheck="false"></div>',
+        '<input class="input" id="h-size" type="number" min="40" max="600" spellcheck="false"></div>',
         '</div>',
       ].join(''),
       buttons: [
@@ -1778,8 +1783,8 @@
           target.color = hexOrEmpty(body.querySelector('#h-color').value) || target.color;
           const size = Number(body.querySelector('#h-size').value);
           if (size > 0) {
-            if (isRow) target.height = Math.max(60, size);
-            else target.width = Math.max(60, size);
+            if (isRow) target.height = Math.max(40, size);
+            else target.width = Math.max(40, size);
           }
           scheduleSave();
           render();
@@ -1970,12 +1975,17 @@
 
     body = openDialog({
       title: cell.name || cell.items.length + ' 个应用',
-      body: '<div class="hintline">单击启动，右键可编辑或删除。</div>',
+      body: '<div class="hintline">单击启动，右键可编辑或删除。双击标题可修改文件夹名称与样式。</div>',
       buttons: [
-        { label: '添加快捷方式', ghost: true, onClick: () => { closeDialog(); openItemDialog(key, null); } },
+        // 注意：返回 false 表示「保持当前弹窗」，否则 openDialog 会在打开添加界面后
+        // 又把它关掉，看起来就像点了没反应
+        { label: '添加快捷方式', ghost: true, onClick: () => { openItemDialog(key, null); return false; } },
         { label: '关闭', primary: true },
       ],
     });
+    el.dialogTitle.classList.add('editable-title');
+    el.dialogTitle.title = '双击修改文件夹名称与样式';
+    el.dialogTitle.ondblclick = () => { closeDialog(); openCellDialog(key); };
     rebuild();
     requestIcons();
   }
@@ -2019,8 +2029,8 @@
       const v = Number(size.value);
       state.settings.iconSize = v;
       el.grid.style.setProperty('--icon-size', v + 'px');
-      const rowH = Math.max(60, Math.round(80 * v / 54));
-      const colW = Math.max(60, Math.round(80 * v / 54));
+      const rowH = Math.max(40, Math.round(80 * v / 54));
+      const colW = Math.max(40, Math.round(80 * v / 54));
       state.pages.forEach((p) => {
         p.rows.forEach((r) => { r.height = rowH; });
         p.cols.forEach((c) => { c.width = colW; });
@@ -2249,6 +2259,18 @@
           toggleSearch(false);
           search.blur();
         }
+      }
+      // 回车确认弹窗：点第一个非「取消」按钮（添加 / 保存 / 确定等）
+      if (e.key === 'Enter' && !e.isComposing && !el.overlay.classList.contains('hidden')) {
+        // 焦点已经在弹窗底部按钮上时交给原生点击，避免触发两次
+        const ae = document.activeElement;
+        if (ae && ae.tagName === 'BUTTON' && el.dialogFoot.contains(ae)) return;
+        const btn = Array.from(el.dialogFoot.querySelectorAll('.btn')).find((b) => !b.classList.contains('ghost'));
+        if (btn) {
+          e.preventDefault();
+          btn.click();
+        }
+        return;
       }
       if (e.key === '/' && document.activeElement !== search && el.overlay.classList.contains('hidden') && !ui.settingsOpen) {
         e.preventDefault();

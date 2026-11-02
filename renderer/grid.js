@@ -146,8 +146,9 @@
     const hideHeads = !!(page && page.hideHeads);
     const offset = hideHeads ? 0 : 1;
 
-    const colTpl = cols.map((c) => Math.max(96, c.width || 150) + 'px').join(' ');
-    const rowTpl = rows.map((r) => Math.max(96, r.height || 150) + 'px').join(' ');
+    const MIN_SIDE = 40; // 行高/列宽下限：允许缩到很小（此前卡在 96，95 以下数值看不出变化）
+    const colTpl = cols.map((c) => Math.max(MIN_SIDE, c.width || 150) + 'px').join(' ');
+    const rowTpl = rows.map((r) => Math.max(MIN_SIDE, r.height || 150) + 'px').join(' ');
     container.style.gridTemplateColumns = hideHeads ? colTpl : `var(--head-w) ${colTpl}`;
     container.style.gridTemplateRows = hideHeads ? rowTpl : `var(--head-h) ${rowTpl}`;
 

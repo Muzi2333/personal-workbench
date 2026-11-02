@@ -460,8 +460,9 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   border-radius: var(--radius);
   background: linear-gradient(180deg, #282a2b, #242627);
   border: 1px solid var(--line-soft);
-  overflow: auto;
-  scrollbar-width: none;
+  /* 内容超出时直接裁剪：不能让格子自身可滚动，否则鼠标在格子上滚轮会滚动格子内容，
+     页面滚动条就拖不动了 */
+  overflow: hidden;
   transition: background 0.16s, border-color 0.16s, box-shadow 0.16s, opacity 0.16s;
 }
 .cell::-webkit-scrollbar { width: 0; height: 0; }
@@ -670,6 +671,15 @@ input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent); }
   font-size: 14px;
   font-weight: 600;
 }
+/* 文件夹弹窗标题：双击可改名 / 改样式 */
+.dialog-head .editable-title {
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 2px 6px;
+  margin: -2px -6px;
+  transition: background 0.14s;
+}
+.dialog-head .editable-title:hover { background: rgba(255, 255, 255, 0.08); }
 .dialog-x {
   width: 26px; height: 26px;
   border: 0; border-radius: 6px;
