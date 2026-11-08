@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('workbench', {
   appVersion: () => ipcRenderer.invoke('app:version'),
   pick: (options) => ipcRenderer.invoke('target:pick', options),
   reveal: (filePath) => ipcRenderer.invoke('target:reveal', filePath),
+  resolveShortcut: (filePath) => ipcRenderer.invoke('target:resolve', filePath),
 
   pathForFile: (file) => {
     try {
@@ -52,5 +53,11 @@ contextBridge.exposeInMainWorld('workbench', {
     get: () => ipcRenderer.invoke('theme:get'),
     set: (source) => ipcRenderer.invoke('theme:set', source),
     onChange: (cb) => ipcRenderer.on('theme:changed', (_e, t) => cb(t)),
+  },
+
+  // 贴边自动收起（QQ 式吸边）
+  edgeSnap: {
+    set: (enabled) => ipcRenderer.invoke('edge-snap:set', enabled),
+    get: () => ipcRenderer.invoke('edge-snap:get'),
   },
 });

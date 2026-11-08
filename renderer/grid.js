@@ -126,10 +126,13 @@
   function render(container, page, state) {
     const cols = (page && page.cols) || [];
     const rows = (page && page.rows) || [];
-    const gap = (page && page.layout && page.layout.gap) || 10;
+    const gap = (state && state.settings && state.settings.gap != null)
+      ? state.settings.gap
+      : ((page && page.layout && page.layout.gap) || 10);
 
     container.innerHTML = '';
     container.style.setProperty('--gap', gap + 'px');
+    container.style.setProperty('--head-radius', (state && state.settings && state.settings.headRadius != null ? state.settings.headRadius : 8) + 'px');
     container.style.setProperty('--icon-size', (state.settings.iconSize || 54) + 'px');
 
     if (!cols.length || !rows.length) {
@@ -159,21 +162,56 @@
 
     // 左上角（行列标题交叉处）：内置「行列转置」按钮
     if (!hideHeads) {
+      // 表头长条底色：盖住标题行/列及其下方间隙，滚动时应用图标不会透到标题文字后面
+      const colBand = document.createElement('div');
+      colBand.className = 'head-band col-band';
+      colBand.style.gridColumn = '2 / -1';
+      colBand.style.gridRow = '1';
+      container.appendChild(colBand);
+
+      const rowBand = document.createElement('div');
+      rowBand.className = 'head-band row-band';
+      rowBand.style.gridColumn = '1';
+      rowBand.style.gridRow = '2 / -1';
+      container.appendChild(rowBand);
+
       const corner = document.createElement('div');
       corner.className = 'corner';
       corner.style.gridColumn = '1';
       corner.style.gridRow = '1';
-      const tr = document.createElement('button');
-      tr.type = 'button';
-      tr.className = 'corner-transpose';
-      tr.title = '行列转置（交换行与列，像 Excel 转置）';
-      tr.setAttribute('aria-label', '行列转置');
-      tr.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">'
-        + '<rect x="1.8" y="1.8" width="12.4" height="12.4" rx="1.6"/>'
-        + '<path d="M1.8 5.9h12.4M5.9 1.8v12.4"/>'
-        + '<path d="M6.4 10.2l3.9-3.9M10.3 8v-1.7h-1.7"/>'
-        + '</svg>';
-      corner.appendChild(tr);
+      // 左上角四宫格工具：转置 / 列倒序 / 行倒序 / 清空整页
+      const tools = document.createElement('div');
+      tools.className = 'corner-tools';
+      const svgAttrs = 'viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"';
+      const cornerBtns = [
+        {
+          action: 'transpose', title: '行列转置（交换行与列，像 Excel 转置）', label: '行列转置',
+          svg: '<rect x="1.8" y="1.8" width="12.4" height="12.4" rx="1.6"/><path d="M1.8 5.9h12.4M5.9 1.8v12.4"/><path d="M6.4 10.2l3.9-3.9M10.3 8v-1.7h-1.7"/>',
+        },
+        {
+          action: 'rev-cols', title: '列倒序（最后一列放最前，最前一列放最后）', label: '列倒序',
+          svg: '<path d="M2 5.5h9M8.5 3L11 5.5 8.5 8"/><path d="M14 10.5H5M7.5 8L5 10.5 7.5 13"/>',
+        },
+        {
+          action: 'rev-rows', title: '行倒序（最后一行放最前，最前一行放最后）', label: '行倒序',
+          svg: '<path d="M5.5 2v9M3 8.5L5.5 11 8 8.5"/><path d="M10.5 14V5M8 7.5L10.5 5 13 7.5"/>',
+        },
+        {
+          action: 'clear-page', title: '清空整页（移除本页所有应用，行列保留）', label: '清空整页',
+          svg: '<path d="M2.8 4.2h10.4M6.2 4.2V2.6h3.6v1.6"/><path d="M4.2 4.2l.6 8.9a1 1 0 0 0 1 .9h4.4a1 1 0 0 0 1-.9l.6-8.9"/><path d="M6.6 6.6v4.4M9.4 6.6v4.4"/>',
+        },
+      ];
+      cornerBtns.forEach((cfg) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'corner-btn';
+        b.dataset.action = cfg.action;
+        b.title = cfg.title;
+        b.setAttribute('aria-label', cfg.label);
+        b.innerHTML = '<svg ' + svgAttrs + '>' + cfg.svg + '</svg>';
+        tools.appendChild(b);
+      });
+      corner.appendChild(tools);
       container.appendChild(corner);
     }
 
@@ -237,7 +275,11 @@
         c.style.gridColumn = String(i + 1 + offset);
         c.style.gridRow = String(j + 1 + offset);
 
-        const st = cell.style || {};
+        // 合并单元格样式：全局 cellStyle[theme] 为基底，cell.style[theme] 里的字段覆盖它（留空 = 继承）
+        const themeKey = (document.documentElement.dataset.theme || 'dark') === 'light' ? 'light' : 'dark';
+        const def = (state && state.settings && state.settings.cellStyle && state.settings.cellStyle[themeKey]) || {};
+        const over = (cell.style && cell.style[themeKey]) || {};
+        const st = Object.assign({}, def, over);
         if (st.bg) c.style.background = st.bg;
         if (st.border) c.style.borderColor = st.border;
         if (st.radius != null && st.radius !== '') c.style.borderRadius = Number(st.radius) + 'px';

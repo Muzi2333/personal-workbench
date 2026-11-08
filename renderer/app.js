@@ -39,6 +39,7 @@
       appVersion: async () => '',
       pick: async () => ({ ok: false, error: '预览模式无法调用文件选择器' }),
       reveal: async () => ({ ok: false }),
+      resolveShortcut: async (p) => ({ target: p }),
       pathForFile: () => '',
       win: { minimize() {}, toggleMax() {}, close() {} },
       onWindowState() {},
@@ -110,13 +111,16 @@
     q: '',
     activeCell: null,
     hoverItem: null, // 鼠标当前悬停的图标 { itemId, cellKey }（Delete 键删除用）
+    hoverStruct: null, // 鼠标当前悬停的结构 { kind:'page'|'row'|'col'|'cell', id, key }（Delete 键删除用）
+    reuseIcon: null, // 「复用其他图标」：{ itemId } = 等待换图标的那个应用（右键菜单里的目标应用）
     folderDialogKey: null, // 当前打开的文件夹弹窗所在格子 key（用于文件夹内 Delete 删除）
     shortcutListening: null, // 正在录制快捷键的 action id（null = 未在录制）
     lastTap: { item: '', t: 0 },
     searchPage: null, // 搜索结果临时页（不落盘）
-    settingsOpen: false, // 设置页（侧栏齿轮进入，不落盘）
+    settingsOpen: false, // 设置页（分页工具条齿轮进入，不落盘）
     settingsTab: 'general', // 设置页当前标签：general / rest / app
     settingsQuery: '', // 设置页搜索词（不落盘）
+    settingsSearchOpen: false, // 设置页搜索框是否展开（点击图标展开）
     restShowPassword: false, // 设置页「显示密码」勾选状态
   };
 
@@ -138,14 +142,20 @@
   /* ---------- 快捷键（可配置） ---------- */
   // fixed=true 表示系统固定键（Enter / Esc），只展示不允许修改
   const SHORTCUT_DEFS = [
-    { id: 'delete', name: '删除应用', desc: '删除鼠标悬停的应用（弹确认框，回车确认）', def: 'Delete' },
+    { id: 'delete', name: '删除（悬停目标）', desc: '删除悬停的应用 / 页签 / 整行 / 整列，或清空悬停的格子（均弹确认框）', def: 'Delete' },
     { id: 'add', name: '添加应用', desc: '在当前格子添加快捷方式', def: 'Ctrl+N' },
-    { id: 'search', name: '打开搜索', desc: '聚焦标题栏搜索框', def: '/' },
+    { id: 'search', name: '打开搜索', desc: '聚焦搜索框', def: '/' },
     { id: 'undo', name: '撤销', desc: '撤销上一步操作', def: 'Ctrl+Z' },
     { id: 'confirm', name: '确认弹窗', desc: '确认当前弹窗的主按钮', def: 'Enter', fixed: true },
     { id: 'cancel', name: '关闭 / 取消', desc: '关闭弹窗、菜单、搜索或退出设置', def: 'Esc', fixed: true },
   ];
   const SHORTCUT_DEFAULTS = SHORTCUT_DEFS.reduce((o, s) => { o[s.id] = s.def; return o; }, {});
+
+  // 单元格统一样式（全局默认）：分深色 / 浅色两套；每个单元格可单独覆盖（留空则继承）
+  const DEFAULT_CELL_STYLE = {
+    dark:  { bg: '#262829', border: '#2b2e30', radius: 12 },
+    light: { bg: '#ffffff', border: '#e4e7ed', radius: 12 },
+  };
 
   function getShortcuts() {
     const s = (state && state.settings && state.settings.shortcuts) || {};
@@ -255,7 +265,7 @@
       version: 3,
       pages: [{ id: 'p1', name: '主页', rows, cols, cells, layout: { gap: 10 } }],
       activePage: 'p1',
-      settings: { iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false, theme: 'system', headStyle: 'solid', shortcuts: Object.assign({}, SHORTCUT_DEFAULTS) },
+      settings: { iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false, theme: 'system', headStyle: 'solid', gap: 10, headRadius: 8, edgeSnap: false, shortcuts: Object.assign({}, SHORTCUT_DEFAULTS), cellStyle: Object.assign({}, DEFAULT_CELL_STYLE) },
       iconCache: {},
     };
   }
@@ -301,6 +311,12 @@
       Object.keys(p.cells).forEach((k) => {
         const c = p.cells[k] || {};
         c.items = Array.isArray(c.items) ? c.items : [];
+        // 旧版 cell.style 是扁平 { bg, border, radius }，升级为双主题格式
+        const st = c.style;
+        if (st && typeof st === 'object' && !('dark' in st) && !('light' in st)) {
+          const flat = { bg: st.bg, border: st.border, radius: st.radius };
+          c.style = { dark: flat, light: {} };
+        }
         p.cells[k] = c;
       });
       p.layout = Object.assign({ gap: 10 }, p.layout || {});
@@ -317,15 +333,23 @@
 
     if (!data.pages.some((p) => p.id === data.activePage)) data.activePage = data.pages[0].id;
 
-    data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false, theme: 'system', headStyle: 'solid' }, data.settings || {});
+    data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false, theme: 'system', headStyle: 'solid', gap: 10, headRadius: 8, edgeSnap: false }, data.settings || {});
     // 快捷键：补齐缺失项（新增的快捷键自动用默认值），不覆盖用户已自定义的
     data.settings.shortcuts = Object.assign({}, SHORTCUT_DEFAULTS, data.settings.shortcuts || {});
+    // 单元格统一样式：补齐深浅色两套，各自再内部补齐字段
+    const cs = data.settings.cellStyle || {};
+    cs.dark = Object.assign({}, DEFAULT_CELL_STYLE.dark, cs.dark || {});
+    cs.light = Object.assign({}, DEFAULT_CELL_STYLE.light, cs.light || {});
+    data.settings.cellStyle = cs;
     data.iconCache = data.iconCache || {};
     // 图标缓存版本：修复打包版 256px 提取脚本缺失（此前一直落 48px 模糊兜底），清缓存重取
     // v7：文件夹 / 文件夹快捷方式统一改用文件夹图标，清掉历史缓存让它们重新提取
-    if (data.cacheVer !== 7) {
+    // v8：Shell 提取的图标改为保留透明通道（不再有黑色底色），清缓存重取
+    // v9：修复 icon-extract.ps1 被双重 BOM 写坏导致 exe 图标退化成小图 / 通用图标，清缓存重取
+    // v10：修复老式掩码图标（如 PuTTY）透明背景变黑底，清缓存重取
+    if (data.cacheVer !== 10) {
       data.iconCache = {};
-      data.cacheVer = 7;
+      data.cacheVer = 10;
     }
     return data;
   }
@@ -362,6 +386,8 @@
     const canvas = el.canvas;
     const sx = canvas.scrollLeft;
     const sy = canvas.scrollTop;
+    // 重渲染会销毁旧节点，悬停记录必须先清掉，否则 Delete 会作用到已经不存在的目标
+    ui.hoverStruct = null;
     if (ui.settingsOpen) renderSettingsPage();
     else Grid.render(el.grid, viewPage(), state);
     canvas.scrollLeft = sx;
@@ -372,13 +398,17 @@
 
   /* --------------------------------- 设置页 --------------------------------- */
 
-  function openSettings() {
+  function openSettings(tab) {
+    cancelReuseIcon(true);
     exitSearch(true);
     const s = $('search');
     if (s) s.value = '';
     el.tbSearch.classList.add('hidden');
     $('btn-search').classList.remove('hidden');
+    if (tab) ui.settingsTab = tab;
     ui.settingsOpen = true;
+    ui.settingsSearchOpen = false;
+    ui.settingsQuery = '';
     render();
     // 配置从主进程读取；读回后刷新当前设置页（失败则保留默认缓存）
     Promise.resolve(restApi.getConfig()).then((cfg) => {
@@ -391,6 +421,8 @@
     if (!ui.settingsOpen) return;
     stopRestStatusTimer();
     ui.settingsOpen = false;
+    ui.settingsSearchOpen = false;
+    ui.settingsQuery = '';
     render();
   }
 
@@ -416,6 +448,15 @@
     if (t && t.source === 'light') html.setAttribute('data-theme', 'light');
     else if (t && t.source === 'dark') html.setAttribute('data-theme', 'dark');
     else html.setAttribute('data-theme', (t && t.dark) ? 'dark' : 'light');
+    paintThemeBtn();
+  }
+
+  // 标题栏主题按钮：图标由 CSS 按 data-theme 切换（浅色=太阳 / 深色=月亮），这里只更新提示文案
+  function paintThemeBtn() {
+    const btn = document.getElementById('btn-theme');
+    if (!btn) return;
+    const dark = (document.documentElement.dataset.theme || 'dark') === 'dark';
+    btn.title = dark ? '切换为浅色模式' : '切换为深色模式';
   }
   function applyCurrentTheme() {
     const source = (state && state.settings && state.settings.theme) || 'system';
@@ -523,7 +564,7 @@
     }
   }
 
-  function generalTabHtml() {
+  function generalTabHtml(s) {
     return [
       '<div class="set-group">',
       '  <div class="set-group-title">数据</div>',
@@ -548,6 +589,10 @@
       '      <option value="dark">深色</option>',
       '      <option value="light">浅色</option>',
       '    </select>',
+      '  </div>',
+      '  <div class="set-row" data-skey="edgeSnap">',
+      '    <div class="set-label">贴边自动收起<span class="set-desc">拖到屏幕上 / 左 / 右边缘自动隐藏，只留一条 4px 窄条；鼠标碰到窄条或窗口展开区域立即弹出（不支持下边）</span></div>',
+      '    <button class="switch' + (s.edgeSnap ? ' on' : '') + '" id="st-edge-snap"></button>',
       '  </div>',
       '</div>',
       '<div class="set-group" data-skey="about">',
@@ -643,10 +688,12 @@
     { id: 'app-launch', tab: 'app', name: '启动方式', desc: '点击图标时单击 / 双击启动' },
     { id: 'app-labels', tab: 'app', name: '图标名称', desc: '在图标下方显示名称' },
     { id: 'app-headstyle', tab: 'app', name: '行列标题样式', desc: '实心纯色框 / 空心线条框 / 仅字体' },
+    { id: 'app-gap', tab: 'app', name: '行列间距', desc: '单元格之间横竖间距，单位 px，对所有页面生效' },
+    { id: 'app-headradius', tab: 'app', name: '标题圆角', desc: '行列标题背景的圆角大小，单位 px' },
     { id: 'app-undo', tab: 'app', name: '撤销历史上限', desc: '最多保留多少条操作记录，0 = 关闭撤销' },
-    { id: 'sc-delete', tab: 'shortcut', name: '快捷键：删除应用', desc: '删除鼠标悬停的应用（弹确认框，回车确认）' },
+    { id: 'sc-delete', tab: 'shortcut', name: '快捷键：删除（悬停目标）', desc: '删除悬停的应用 / 页签 / 整行 / 整列，或清空悬停的格子（均弹确认框）' },
     { id: 'sc-add', tab: 'shortcut', name: '快捷键：添加应用', desc: '在当前格子添加快捷方式' },
-    { id: 'sc-search', tab: 'shortcut', name: '快捷键：打开搜索', desc: '聚焦标题栏搜索框' },
+    { id: 'sc-search', tab: 'shortcut', name: '快捷键：打开搜索', desc: '聚焦搜索框' },
     { id: 'sc-undo', tab: 'shortcut', name: '快捷键：撤销', desc: '撤销上一步操作' },
     { id: 'sc-confirm', tab: 'shortcut', name: '快捷键：确认弹窗', desc: '确认当前弹窗的主按钮（系统固定）' },
     { id: 'sc-cancel', tab: 'shortcut', name: '快捷键：关闭 / 取消', desc: '关闭弹窗、菜单、搜索或退出设置（系统固定）' },
@@ -663,6 +710,7 @@
     const entry = SETTINGS_INDEX.find((it) => it.id === id);
     if (!entry) return;
     ui.settingsQuery = '';
+    ui.settingsSearchOpen = false;
     ui.settingsTab = entry.tab;
     render();
     requestAnimationFrame(() => {
@@ -697,9 +745,44 @@
       '      <button data-v="text"' + (s.headStyle === 'text' ? ' class="on"' : '') + '>仅字体</button>',
       '    </div>',
       '  </div>',
+      '  <div class="set-row" data-skey="app-gap">',
+      '    <div class="set-label">行列间距<span class="set-desc">单元格之间横竖间距（px），对所有页面生效</span></div>',
+      '    <input class="input set-num" id="st-gap" type="number" min="0" max="40" value="' + (s.gap != null ? s.gap : 10) + '">',
+      '  </div>',
+      '  <div class="set-row" data-skey="app-headradius">',
+      '    <div class="set-label">标题圆角<span class="set-desc">行列标题背景的圆角（px）</span></div>',
+      '    <input class="input set-num" id="st-headradius" type="number" min="0" max="30" value="' + (s.headRadius != null ? s.headRadius : 8) + '">',
+      '  </div>',
       '  <div class="set-row" data-skey="app-undo">',
       '    <div class="set-label">撤销历史上限<span class="set-desc">最多保留多少条操作记录，0 = 关闭撤销</span></div>',
       '    <input class="input set-num" id="st-undo" type="number" min="0" max="1000" value="' + (s.undoLimit || 0) + '">',
+      '  </div>',
+      '</div>',
+      '<div class="set-group">',
+      '  <div class="set-group-title">单元格外观<span class="set-desc" style="display:inline">所有格子的默认外观；每个单元格可单独覆盖（右键格子 →「样式」），留空表示继承此处</span></div>',
+      '  <div class="cell-style-pair">',
+      '    <div class="cell-style-col" data-theme="dark">',
+      '      <div class="cell-style-head"><span class="cs-ico">🌙</span>深色模式</div>',
+      '      <div class="cs-field"><label>背景色</label><div class="color-field">',
+      '        <input type="color" id="cs-dark-bg-pick" value="' + (hexOrEmpty(s.cellStyle.dark.bg) || DEFAULT_CELL_STYLE.dark.bg) + '" class="cs-pick" style="width:30px;height:28px;padding:0;border:1px solid var(--line);border-radius:6px;background:transparent;cursor:pointer">',
+      '        <input class="input cs-input" id="cs-dark-bg" value="' + (hexOrEmpty(s.cellStyle.dark.bg) || '') + '" spellcheck="false"></div></div>',
+      '      <div class="cs-field"><label>边框色</label><div class="color-field">',
+      '        <input type="color" id="cs-dark-border-pick" value="' + (hexOrEmpty(s.cellStyle.dark.border) || DEFAULT_CELL_STYLE.dark.border) + '" class="cs-pick" style="width:30px;height:28px;padding:0;border:1px solid var(--line);border-radius:6px;background:transparent;cursor:pointer">',
+      '        <input class="input cs-input" id="cs-dark-border" value="' + (hexOrEmpty(s.cellStyle.dark.border) || '') + '" spellcheck="false"></div></div>',
+      '      <div class="cs-field"><label>圆角</label>',
+      '        <input class="input cs-input cs-radius" id="cs-dark-radius" type="number" min="0" max="40" value="' + (s.cellStyle.dark.radius != null ? s.cellStyle.dark.radius : DEFAULT_CELL_STYLE.dark.radius) + '"></div>',
+      '    </div>',
+      '    <div class="cell-style-col" data-theme="light">',
+      '      <div class="cell-style-head"><span class="cs-ico">☀️</span>浅色模式</div>',
+      '      <div class="cs-field"><label>背景色</label><div class="color-field">',
+      '        <input type="color" id="cs-light-bg-pick" value="' + (hexOrEmpty(s.cellStyle.light.bg) || DEFAULT_CELL_STYLE.light.bg) + '" class="cs-pick" style="width:30px;height:28px;padding:0;border:1px solid var(--line);border-radius:6px;background:transparent;cursor:pointer">',
+      '        <input class="input cs-input" id="cs-light-bg" value="' + (hexOrEmpty(s.cellStyle.light.bg) || '') + '" spellcheck="false"></div></div>',
+      '      <div class="cs-field"><label>边框色</label><div class="color-field">',
+      '        <input type="color" id="cs-light-border-pick" value="' + (hexOrEmpty(s.cellStyle.light.border) || DEFAULT_CELL_STYLE.light.border) + '" class="cs-pick" style="width:30px;height:28px;padding:0;border:1px solid var(--line);border-radius:6px;background:transparent;cursor:pointer">',
+      '        <input class="input cs-input" id="cs-light-border" value="' + (hexOrEmpty(s.cellStyle.light.border) || '') + '" spellcheck="false"></div></div>',
+      '      <div class="cs-field"><label>圆角</label>',
+      '        <input class="input cs-input cs-radius" id="cs-light-radius" type="number" min="0" max="40" value="' + (s.cellStyle.light.radius != null ? s.cellStyle.light.radius : DEFAULT_CELL_STYLE.light.radius) + '"></div>',
+      '    </div>',
       '  </div>',
       '</div>',
     ].join('');
@@ -745,29 +828,36 @@
     el.grid.style.display = 'block';
     el.grid.innerHTML = [
       '<div class="settings-page">',
-      '  <div class="settings-head">',
-      '    <button class="btn" id="st-back">‹ 返回</button>',
-      '    <span class="settings-title">设置</span>',
-      '    <input class="input st-search" id="st-search" placeholder="搜索设置项…" autocomplete="off" spellcheck="false">',
-      '  </div>',
-      '  <div class="set-tabs" id="st-tabs">',
-      tabs.map(([key, name]) => '    <button data-tab="' + key + '"' + (tab === key ? ' class="on"' : '') + '>' + name + '</button>').join(''),
+      '  <div class="settings-bar">',
+      '    <div class="set-tabs" id="st-tabs">',
+      tabs.map(([key, name]) => '      <button data-tab="' + key + '"' + (tab === key ? ' class="on"' : '') + '>' + name + '</button>').join(''),
+      '    </div>',
+      '    <div class="page-tools">',
+      '      <button class="tb-btn slim' + (ui.settingsSearchOpen ? ' hidden' : '') + '" id="st-search-btn" title="搜索设置项">',
+      '        <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.6 10.6l3.2 3.2" stroke="currentColor" stroke-width="1.3"/></svg>',
+      '      </button>',
+      '      <div class="search tb-search st-search-wrap' + (ui.settingsSearchOpen ? '' : ' hidden') + '" id="st-search-wrap">',
+      '        <svg viewBox="0 0 16 16" width="14" height="14" class="search-ico"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.6 10.6l3.2 3.2" stroke="currentColor" stroke-width="1.3"/></svg>',
+      '        <input class="st-search" id="st-search" type="text" placeholder="搜索设置项…" autocomplete="off" spellcheck="false">',
+      '        <span class="kbd">esc</span>',
+      '      </div>',
+      '    </div>',
       '  </div>',
       '  <div class="settings-search-results" id="st-sres" style="display:none"></div>',
       '  <div class="settings-body" id="st-body">',
-      tab === 'rest' ? restTabHtml() : tab === 'app' ? appTabHtml(s) : tab === 'shortcut' ? shortcutTabHtml() : generalTabHtml(),
+      tab === 'rest' ? restTabHtml() : tab === 'app' ? appTabHtml(s) : tab === 'shortcut' ? shortcutTabHtml() : generalTabHtml(s),
       '  </div>',
       '</div>',
     ].join('');
 
     const q = (sel) => el.grid.querySelector(sel);
 
-    q('#st-back').addEventListener('click', closeSettings);
     q('#st-tabs').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-tab]');
       if (!b || b.dataset.tab === ui.settingsTab) return;
       ui.settingsTab = b.dataset.tab;
       ui.settingsQuery = ''; // 手动切页签时退出搜索
+      ui.settingsSearchOpen = false;
       render();
       if (el.canvas) el.canvas.scrollTop = 0;
     });
@@ -799,7 +889,25 @@
     };
 
     const stSearch = q('#st-search');
+    const stWrap = q('#st-search-wrap');
+    const stBtn = q('#st-search-btn');
     stSearch.value = ui.settingsQuery || '';
+
+    // 搜索图标点击展开输入框（与快速启动的搜索同款）；Esc 收起，有内容时先清空
+    const setSearchOpen = (open, focus) => {
+      ui.settingsSearchOpen = !!open;
+      if (stWrap) stWrap.classList.toggle('hidden', !open);
+      if (stBtn) stBtn.classList.toggle('hidden', !!open);
+      if (open) {
+        if (focus) setTimeout(() => stSearch.focus(), 20);
+      } else {
+        stSearch.value = '';
+        ui.settingsQuery = '';
+        paintSettingsSearch();
+      }
+    };
+    if (stBtn) stBtn.addEventListener('click', () => setSearchOpen(true, true));
+
     stSearch.addEventListener('input', () => {
       ui.settingsQuery = stSearch.value;
       paintSettingsSearch();
@@ -809,12 +917,16 @@
         e.preventDefault();
         const first = el.grid.querySelector('#st-sres .st-hit');
         if (first) jumpToSetting(first.dataset.sid);
-      } else if (e.key === 'Escape' && stSearch.value) {
-        // 有内容时先清空搜索，不冒泡触发「关闭设置页」
+      } else if (e.key === 'Escape') {
+        // 不冒泡触发「关闭设置页」：有内容先清空，否则收起搜索框
         e.stopPropagation();
-        stSearch.value = '';
-        ui.settingsQuery = '';
-        paintSettingsSearch();
+        if (stSearch.value) {
+          stSearch.value = '';
+          ui.settingsQuery = '';
+          paintSettingsSearch();
+        } else {
+          setSearchOpen(false);
+        }
       }
     });
     q('#st-sres').addEventListener('click', (e) => {
@@ -906,6 +1018,19 @@
       });
     }
 
+    // 贴边自动收起开关：立即通知主进程启用 / 停用
+    const esSnap = q('#st-edge-snap');
+    if (esSnap) {
+      esSnap.addEventListener('click', () => {
+        const next = !esSnap.classList.contains('on');
+        pushHistory();
+        state.settings.edgeSnap = next;
+        esSnap.classList.toggle('on', next);
+        scheduleSave();
+        if (api.edgeSnap) api.edgeSnap.set(next).catch(() => {});
+      });
+    }
+
     /* -------------------------------- 应用页 -------------------------------- */
 
     const launchSeg = q('#st-launch');
@@ -964,6 +1089,85 @@
         toast('撤销上限已设为 ' + v + ' 条', 'ok');
       });
     }
+
+    // 行列间距 / 标题圆角：即时生效，change 时记一条历史
+    const bindNum = (id, key, min, max) => {
+      const inp = q('#' + id);
+      if (!inp) return;
+      const fit = () => { inp.style.width = 'calc(' + Math.max(2, String(inp.value).length + 2) + 'ch + 16px)'; };
+      fit();
+      inp.addEventListener('input', fit);
+      inp.addEventListener('change', () => {
+        const v = Math.max(min, Math.min(max, Number(inp.value) || 0));
+        inp.value = String(v);
+        fit();
+        if (v === (state.settings[key] != null ? state.settings[key] : 0)) return;
+        pushHistory();
+        state.settings[key] = v;
+        scheduleSave();
+        render();
+      });
+    };
+    bindNum('st-gap', 'gap', 0, 40);
+    bindNum('st-headradius', 'headRadius', 0, 30);
+
+    /* -------------------------------- 单元格统一样式 -------------------------------- */
+
+    // 单元格外观：深浅色两套 bg/border/radius，改一个字段立即生效
+    ['dark', 'light'].forEach((theme) => {
+      const cs = state.settings.cellStyle[theme];
+      // input 时即时预览 + 防抖保存；change 时才记一条历史
+      const preview = (field, val) => {
+        if (val == null || val === '') delete cs[field];
+        else cs[field] = (field === 'radius') ? Number(val) : val;
+        scheduleSave();
+        render();
+      };
+      ['bg', 'border'].forEach((f) => {
+        const inp = q('#cs-' + theme + '-' + f);
+        const pick = q('#cs-' + theme + '-' + f + '-pick');
+        if (inp && pick) {
+          let lastPushedVal = null;
+          const doInput = () => {
+            const v = hexOrEmpty(inp.value);
+            if (v) pick.value = v;
+            preview(f, v);
+          };
+          const doChange = () => {
+            const v = hexOrEmpty(inp.value);
+            const key = f + '=' + (v || '');
+            if (key !== lastPushedVal) { pushHistory(); lastPushedVal = key; }
+            preview(f, v);
+          };
+          inp.addEventListener('input', doInput);
+          inp.addEventListener('change', doChange);
+          pick.addEventListener('input', () => { inp.value = pick.value; doInput(); });
+          pick.addEventListener('change', () => { inp.value = pick.value; doChange(); });
+          bindColorPair('#cs-' + theme + '-' + f, '#cs-' + theme + '-' + f + '-pick');
+        }
+      });
+      const rad = q('#cs-' + theme + '-radius');
+      if (rad) {
+        let lastPushedRad = null;
+        rad.addEventListener('input', () => {
+          const v = trim(rad.value);
+          if (v === '') { preview('radius', null); return; }
+          preview('radius', Number(v) || 0);
+        });
+        rad.addEventListener('change', () => {
+          const v = trim(rad.value);
+          if (v === '') {
+            if (lastPushedRad !== '') { pushHistory(); lastPushedRad = ''; }
+            preview('radius', null); rad.value = '';
+            return;
+          }
+          const n = Math.max(0, Math.min(40, Number(v) || 0));
+          rad.value = String(n);
+          if (n !== lastPushedRad) { pushHistory(); lastPushedRad = n; }
+          preview('radius', n);
+        });
+      }
+    });
 
     /* -------------------------------- 快捷键页 -------------------------------- */
 
@@ -1231,7 +1435,7 @@
     el.hint.innerHTML = '';
     let parts;
     if (ui.settingsOpen) {
-      parts = ['设置', '点左上角「‹ 返回」或按 Esc 回到宫格'];
+      parts = ['设置', '点左侧「快速启动」或按 Esc 回到宫格'];
     } else if (ui.searchPage) {
       const sp = ui.searchPage;
       parts = [
@@ -1247,7 +1451,7 @@
       parts = [
         p.rows.length + ' 行 · ' + p.cols.length + ' 列 · ' + total + ' 个图标',
         state.settings.launch === 'double' ? '双击启动' : '单击启动',
-        state.settings.locked ? '布局已锁定，点顶栏锁按钮解锁' : '拖动图标到别的格子即可成组',
+        state.settings.locked ? '布局已锁定，点上方锁按钮解锁' : '拖动图标到别的格子即可成组',
         '拖动表头可整行/整列移动',
       ];
     }
@@ -1429,6 +1633,51 @@
     return null;
   }
 
+  // 按 id 找到应用所在页 / 格子 / 条目（复用图标可跨页）
+  function findItemEverywhere(itemId) {
+    if (!itemId) return null;
+    for (const p of state.pages) {
+      for (const k of Object.keys(p.cells || {})) {
+        const items = (p.cells[k] && p.cells[k].items) || [];
+        const it = items.find((i) => i.id === itemId);
+        if (it) return { page: p, key: k, item: it };
+      }
+    }
+    return null;
+  }
+
+  // 统计整页 / 整行 / 整列里的应用数量（确认框里提示"会删掉几个"）
+  function pageItemCount(page) {
+    let n = 0;
+    Object.keys((page && page.cells) || {}).forEach((k) => {
+      n += (((page.cells[k] && page.cells[k].items) || []).length);
+    });
+    return n;
+  }
+
+  function rowItemCount(page, rowId) {
+    let n = 0;
+    ((page && page.cols) || []).forEach((c) => {
+      const cell = page.cells && page.cells[Grid.cellKey(rowId, c.id)];
+      n += ((cell && cell.items) || []).length;
+    });
+    return n;
+  }
+
+  function colItemCount(page, colId) {
+    let n = 0;
+    ((page && page.rows) || []).forEach((r) => {
+      const cell = page.cells && page.cells[Grid.cellKey(r.id, colId)];
+      n += ((cell && cell.items) || []).length;
+    });
+    return n;
+  }
+
+  // 「里面 N 个应用」/「里面没有应用」的文案
+  function countText(n) {
+    return n > 0 ? '里面的 ' + n + ' 个应用会一起移除' : '里面没有应用';
+  }
+
   // 按 id 删除应用（所有页面里的同一条目都会移除），用于悬停按 Delete
   function removeItemById(itemId) {
     let removed = false;
@@ -1498,7 +1747,121 @@
     return true;
   }
 
+  // 复用图标：进入 / 退出拾取模式，以及把源图标的图标复制到目标图标
+  function startReuseIcon(itemId) {
+    ui.reuseIcon = { itemId };
+    document.body.classList.add('reuse-icon-mode');
+    toast('请点击另一个应用图标，把它的图标复制到这个应用（按 Esc 取消）', 'ok');
+  }
+
+  function cancelReuseIcon(silent) {
+    if (!ui.reuseIcon) return;
+    ui.reuseIcon = null;
+    document.body.classList.remove('reuse-icon-mode');
+    if (!silent) toast('已取消复用图标');
+  }
+
+  // 解析一个应用「实际显示」的图标：emoji / 自定义图片 / 指定图标文件 / 自动提取
+  // 自动提取的也要落到具体图片（data URL 或本地图标文件路径），保证复制后长得一模一样
+  async function resolveIconOf(item) {
+    const ic = item && item.icon;
+    if (ic && ic.type === 'emoji' && ic.value) return { type: 'emoji', value: ic.value };
+    if (ic && (ic.type === 'image' || ic.type === 'file') && ic.value) {
+      return { type: ic.type, value: ic.value };
+    }
+
+    // 剩下的都是 auto（含 { type:'auto', value:'' } 这种历史数据）
+    if (!item || !item.target) return null;
+    let cached = state.iconCache[item.target];
+    if (!cached && /^https?:/i.test(item.target)) {
+      try { cached = await fetchFavicon(item.target); } catch (_) {}
+    }
+    if (!cached && api.icon) {
+      try { cached = await api.icon(item.target); } catch (_) {}
+    }
+    if (!cached) return null;
+    state.iconCache[item.target] = cached;
+    return { type: 'image', value: cached };
+  }
+
+  // 复用图标：把 fromItem（被点击的应用）的图标复制给 toItemId（右键菜单里的应用）
+  async function applyReuseIcon(fromItem, toItemId) {
+    cancelReuseIcon(true);
+    const found = findItemEverywhere(toItemId);
+    if (!found || !fromItem) return;
+    const dst = found.item;
+
+    const copied = await resolveIconOf(fromItem);
+    if (!copied) {
+      toast('没取到这个应用的图标，稍后再试', 'err');
+      return;
+    }
+
+    pushHistory();
+    dst.icon = copied;
+    scheduleSave();
+    // 在文件夹弹窗里完成的复用：关掉弹窗，回到宫格看结果
+    if (ui.folderDialogKey !== null) closeDialog();
+    render();
+    requestIcons();
+    toast('已把「' + (fromItem.name || '未命名') + '」的图标复制过来', 'ok');
+  }
+
+  // 悬停页签 / 行标题 / 列标题 / 格子 + Delete：删除整页、整行、整列或清空格子（都带确认）
+  function confirmDeleteHoveredStruct() {
+    const h = ui.hoverStruct;
+    if (!h) return false;
+
+    if (h.kind === 'page') {
+      const page = state.pages.find((p) => p.id === h.id);
+      if (!page) return false;
+      if (state.pages.length <= 1) { toast('至少保留一页', 'err'); return true; }
+      confirmDialog('删除这一页？', '「' + (page.name || '未命名') + '」' + countText(pageItemCount(page)) + '，可用 ' + shortcutHint('undo') + ' 撤销。', '删除', () => removePage(page.id));
+      return true;
+    }
+
+    if (h.kind === 'row' || h.kind === 'col') {
+      const list = h.kind === 'row' ? curPage().rows : curPage().cols;
+      const obj = (list || []).find((x) => x.id === h.id);
+      if (!obj) return false;
+      const unit = h.kind === 'row' ? '行' : '列';
+      const label = (obj.name || '未命名').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const count = h.kind === 'row' ? rowItemCount(curPage(), obj.id) : colItemCount(curPage(), obj.id);
+      confirmDialog('删除这一' + unit + '？', '「' + label + '」' + countText(count) + '，可用 ' + shortcutHint('undo') + ' 撤销。', '删除', () => {
+        if (h.kind === 'row') removeRow(h.id);
+        else removeCol(h.id);
+      });
+      return true;
+    }
+
+    if (h.kind === 'cell') {
+      const cell = h.key ? cellOf(h.key, false) : null;
+      const count = cell && (cell.items || []).length;
+      if (!count) return false;
+      confirmDialog('清空这个格子？', '其中的 ' + count + ' 个图标会被移除，可用 ' + shortcutHint('undo') + ' 撤销。', '清空', () => {
+        pushHistory();
+        delete curPage().cells[h.key];
+        scheduleSave();
+        render();
+        toast('已清空格子', 'ok');
+      });
+      return true;
+    }
+
+    return false;
+  }
+
   function handleIconTap(item) {
+    // 复用图标模式：这次点击只是「取图标」，把被点应用的图标复制给右键的那个应用，绝不启动
+    if (ui.reuseIcon) {
+      if (ui.reuseIcon.itemId === item.id) {
+        toast('请点击另一个应用图标', 'err');
+        return;
+      }
+      applyReuseIcon(item, ui.reuseIcon.itemId);
+      return;
+    }
+
     if (state.settings.launch === 'single') {
       launchItem(item);
       return;
@@ -1616,11 +1979,11 @@
     document.querySelectorAll('.cell.drop-hover').forEach((c) => c.classList.remove('drop-hover'));
   }
 
-  // 跨页拖拽：拖拽物悬停到侧边栏页项上时切换到该页，随后可落在该页目标格
+  // 跨页拖拽：拖拽物悬停到分页工具条的页签上时切换到该页，随后可落在该页目标格
   function dragHoverPage(x, y) {
     const node = document.elementFromPoint(x, y);
-    const item = node && node.closest ? node.closest('.page-item') : null;
-    document.querySelectorAll('.page-item.drop-hover').forEach((n) => {
+    const item = node && node.closest ? node.closest('.page-tab') : null;
+    document.querySelectorAll('.page-tab.drop-hover').forEach((n) => {
       if (n !== item) n.classList.remove('drop-hover');
     });
     if (!item || !item.dataset.id) return;
@@ -1629,7 +1992,7 @@
   }
 
   function clearPageHover() {
-    document.querySelectorAll('.page-item.drop-hover').forEach((n) => n.classList.remove('drop-hover'));
+    document.querySelectorAll('.page-tab.drop-hover').forEach((n) => n.classList.remove('drop-hover'));
   }
 
   function clearMergePreview() {
@@ -1695,7 +2058,7 @@
     const onMove = (e) => {
       if (!moved) {
         if (Math.hypot(e.clientX - startX, e.clientY - startY) < 7) return;
-        if (state.settings.locked) { blocked = true; toast('布局已锁定，点顶栏锁按钮解锁后再拖动', 'err'); return; }
+        if (state.settings.locked) { blocked = true; toast('布局已锁定，点上方锁按钮解锁后再拖动', 'err'); return; }
         moved = true;
         ghost = makeGhost(node);
         if (node) node.classList.add('is-dragging');
@@ -1768,7 +2131,7 @@
     const onMove = (e) => {
       if (!moved) {
         if (Math.hypot(e.clientX - startX, e.clientY - startY) < 7) return;
-        if (state.settings.locked) { blocked = true; toast('布局已锁定，点顶栏锁按钮解锁后再拖动', 'err'); return; }
+        if (state.settings.locked) { blocked = true; toast('布局已锁定，点上方锁按钮解锁后再拖动', 'err'); return; }
         moved = true;
         ghost = makeGhost(node);
         if (node) node.classList.add('is-dragging');
@@ -1937,6 +2300,45 @@
     toast('已转置：行 ↔ 列，可用 ' + shortcutHint('undo') + ' 撤销', 'ok');
   }
 
+  // 列倒序：最后一列放最前，最前一列放最后（单元格跟着列走）
+  function reverseCols() {
+    const page = curPage();
+    if (!page || page.cols.length < 2) { toast('列数不足，无需倒序', 'err'); return; }
+    pushHistory();
+    page.cols.reverse();
+    scheduleSave();
+    render();
+    toast('已倒序列顺序，可用 ' + shortcutHint('undo') + ' 撤销', 'ok');
+  }
+
+  // 行倒序：最后一行放最前，最前一行放最后（单元格跟着行走）
+  function reverseRows() {
+    const page = curPage();
+    if (!page || page.rows.length < 2) { toast('行数不足，无需倒序', 'err'); return; }
+    pushHistory();
+    page.rows.reverse();
+    scheduleSave();
+    render();
+    toast('已倒序行顺序，可用 ' + shortcutHint('undo') + ' 撤销', 'ok');
+  }
+
+  // 清空整页：移除本页所有应用，行列与页面本身保留
+  function clearPageItems() {
+    const page = curPage();
+    if (!page) return;
+    const n = pageItemCount(page);
+    if (!n) { toast('本页没有应用可清空', 'err'); return; }
+    pushHistory();
+    Object.keys(page.cells || {}).forEach((k) => {
+      if (page.cells[k]) page.cells[k].items = [];
+    });
+    ui.activeCell = null;
+    ui.hoverItem = null;
+    scheduleSave();
+    render();
+    toast('已清空本页 ' + n + ' 个应用，可用 ' + shortcutHint('undo') + ' 撤销', 'ok');
+  }
+
   function removeRow(id) {
     const page = curPage();
     const idx = page.rows.findIndex((r) => r.id === id);
@@ -1964,34 +2366,36 @@
   /* --------------------------------- 页管理 --------------------------------- */
 
   function renderSidebar() {
-    if (!el.pageList) return;
-    el.pageList.innerHTML = '';
+    // 侧栏只有一个「快速启动」入口：设置页打开时不高亮
+    const btnQuick = $('btn-quickstart');
+    if (btnQuick) btnQuick.classList.toggle('active', !ui.settingsOpen);
 
-    // 搜索时在顶部插入一个临时的「搜索结果」页项（不是真实页）
-    if (ui.searchPage) {
-      const b = document.createElement('button');
-      b.className = 'page-item search-item active';
-      b.title = '搜索结果：继续在搜索框里输入';
-      const name = document.createElement('span');
-      name.className = 'page-name';
-      name.textContent = '搜索结果 (' + ui.searchPage.hitCount + ')';
-      b.appendChild(name);
-      b.addEventListener('click', () => { const s = $('search'); if (s) s.focus(); });
-      el.pageList.appendChild(b);
-    }
+    // 设置页占用宫格区域时隐藏分页工具条（设置页自带「‹ 返回」）
+    if (el.pageBar) el.pageBar.classList.toggle('hidden', ui.settingsOpen);
 
-    // 设置页打开时：齿轮高亮，页项都不高亮
+    // 侧栏底部「设置」与「快速启动」二选一高亮
     const btnSettings = $('btn-settings');
     if (btnSettings) btnSettings.classList.toggle('active', ui.settingsOpen);
 
+    if (!el.pageTabs) return;
+    el.pageTabs.innerHTML = '';
+
+    // 搜索时在最前面插入一个临时的「搜索结果」页签（不是真实页）
+    if (ui.searchPage) {
+      const b = document.createElement('button');
+      b.className = 'page-tab search-item on';
+      b.title = '搜索结果：继续在搜索框里输入';
+      b.textContent = '搜索结果 (' + ui.searchPage.hitCount + ')';
+      b.addEventListener('click', () => { const s = $('search'); if (s) s.focus(); });
+      el.pageTabs.appendChild(b);
+    }
+
     state.pages.forEach((p) => {
       const b = document.createElement('button');
-      b.className = 'page-item' + (p.id === state.activePage && !ui.searchPage && !ui.settingsOpen ? ' active' : '');
+      b.className = 'page-tab' + (p.id === state.activePage && !ui.searchPage && !ui.settingsOpen ? ' on' : '');
       b.dataset.id = p.id;
-      const name = document.createElement('span');
-      name.className = 'page-name';
-      name.textContent = p.name;
-      b.appendChild(name);
+      b.title = p.name;
+      b.textContent = p.name;
       b.addEventListener('click', () => {
         if (ui.suppressPageClick) { ui.suppressPageClick = false; return; }
         switchPage(p.id);
@@ -2000,13 +2404,26 @@
         e.preventDefault();
         openPageMenu(p.id, e.clientX, e.clientY);
       });
+      b.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        openPageDialog(p.id);
+      });
       b.addEventListener('pointerdown', (e) => startPageDrag(e, p.id, b));
-      el.pageList.appendChild(b);
+      el.pageTabs.appendChild(b);
     });
+
+    // 「+」：增加一页应用
+    const add = document.createElement('button');
+    add.className = 'page-add';
+    add.title = '增加一页应用';
+    add.textContent = '+';
+    add.addEventListener('click', () => addPage());
+    el.pageTabs.appendChild(add);
   }
 
   function switchPage(id) {
-    // 切换页面时退出设置页 / 搜索页
+    // 切换页面时退出设置页 / 搜索页（复用图标模式保留，允许跨页复用）
+
     const wasSettings = ui.settingsOpen;
     ui.settingsOpen = false;
     // 从搜索结果页切到真实页：先退出搜索，再切换
@@ -2086,15 +2503,16 @@
       { label: '在前面插入一页', action: () => addPage(idx) },
       { label: '在后面插入一页', action: () => addPage(idx + 1) },
       { sep: true },
-      { label: '删除这一页', danger: true, action: () => {
-        confirmDialog('删除这一页？', '其中的图标会一起移除。', '删除', () => removePage(id));
+      { label: '删除这一页', danger: true, hint: shortcutHint('delete'), action: () => {
+        const page = state.pages[idx];
+        confirmDialog('删除这一页？', '「' + (page.name || '未命名') + '」' + countText(pageItemCount(page)) + '。', '删除', () => removePage(id));
       } },
     ]);
   }
 
-  // 页拖拽排序
+  // 页签拖拽排序（水平方向）
   function startPageDrag(ev, id, node) {
-    if (ev.button !== 0) return;
+    if (ev.button !== 0 || ui.searchPage) return;
     const startX = ev.clientX;
     const startY = ev.clientY;
     const from = state.pages.findIndex((p) => p.id === id);
@@ -2113,16 +2531,16 @@
         document.body.appendChild(line);
         node.classList.add('is-dragging');
       }
-      const nodes = Array.from(el.pageList.querySelectorAll('.page-item'));
+      const nodes = Array.from(el.pageTabs.querySelectorAll('.page-tab'));
       const rects = nodes.map((n) => n.getBoundingClientRect());
       let insert = 0;
-      rects.forEach((r) => { if (e.clientY > r.top + r.height / 2) insert++; });
+      rects.forEach((r) => { if (e.clientX > r.left + r.width / 2) insert++; });
       to = insert;
       const first = rects[0];
       const last = rects[rects.length - 1];
       if (first) {
-        const y = insert < rects.length ? rects[insert].top - 4 : last.bottom + 4;
-        line.style.cssText = 'display:block;left:' + first.left + 'px;top:' + y + 'px;width:' + first.width + 'px;height:2px;';
+        const x = insert < rects.length ? rects[insert].left - 4 : last.right + 4;
+        line.style.cssText = 'display:block;left:' + x + 'px;top:' + first.top + 'px;width:2px;height:' + first.height + 'px;';
       }
     };
 
@@ -2225,6 +2643,7 @@
     openMenu(x, y, [
       { label: '打开', action: () => launchItem(item) },
       { label: '编辑', action: () => openItemDialog(cellKey, item) },
+      { label: '复用其他图标', sub: '↗', action: () => startReuseIcon(itemId) },
       item.target && isLocalTarget(item.target)
         ? { label: '在资源管理器中显示', action: () => api.reveal(item.target) }
         : { sep: true },
@@ -2274,9 +2693,12 @@
       {
         label: '删除这一' + unit,
         danger: true,
+        hint: shortcutHint('delete'),
         action: () => {
           if (list.length <= 1) { toast('至少保留一' + unit, 'err'); return; }
-          confirmDialog('删除这一' + unit + '？', '其中的图标会一起移除。', '删除', () => {
+          const count = axis === 'row' ? rowItemCount(curPage(), id) : colItemCount(curPage(), id);
+          const obj2 = list.find((x) => x.id === id) || {};
+          confirmDialog('删除这一' + unit + '？', '「' + (obj2.name || '未命名') + '」' + countText(count) + '。', '删除', () => {
             if (axis === 'row') removeRow(id);
             else removeCol(id);
           });
@@ -2441,8 +2863,15 @@
     body.querySelector('#f-browse').addEventListener('click', async () => {
       const res = await api.pick({ title: '选择要启动的程序或文件' });
       if (res && res.ok) {
-        fTarget.value = res.path;
-        if (!trim(fName.value)) fName.value = baseName(res.path);
+        let path = res.path;
+        const name = baseName(path);
+        // .lnk 快捷方式：名字用快捷方式文件名，目标用它真实指向的程序
+        if (api.resolveShortcut) {
+          const info = await api.resolveShortcut(path);
+          if (info && info.target) path = info.target;
+        }
+        fTarget.value = path;
+        if (!trim(fName.value)) fName.value = name;
       } else if (res && res.error) {
         toast(res.error, 'err');
       }
@@ -2513,38 +2942,53 @@
 
   function openCellDialog(key) {
     const cell = cellOf(key, true);
-    const st = cell.style || {};
+    const st = cell.style || (cell.style = {});
+    st.dark = st.dark || {};
+    st.light = st.light || {};
+
+    const themeBlock = (theme, label, ico, def) => {
+      const t = st[theme];
+      const pickStyle = 'width:34px;height:32px;padding:0;border:1px solid var(--line);border-radius:7px;background:transparent;cursor:pointer';
+      return [
+        '<div class="cell-style-col" data-theme="' + theme + '">',
+        '  <div class="cell-style-head"><span class="cs-ico">' + ico + '</span>' + label + '</div>',
+        '  <div class="field"><label>背景色（留空=继承默认）</label><div class="color-field">',
+        '    <input type="color" id="cd-' + theme + '-bg-pick" value="' + (hexOrEmpty(t.bg) || def.bg) + '" style="' + pickStyle + '">',
+        '    <input class="input" id="cd-' + theme + '-bg" placeholder="留空=默认" spellcheck="false"></div></div>',
+        '  <div class="field"><label>边框色（留空=继承默认）</label><div class="color-field">',
+        '    <input type="color" id="cd-' + theme + '-border-pick" value="' + (hexOrEmpty(t.border) || def.border) + '" style="' + pickStyle + '">',
+        '    <input class="input" id="cd-' + theme + '-border" placeholder="留空=默认" spellcheck="false"></div></div>',
+        '  <div class="field"><label>圆角（px，留空=继承默认）</label>',
+        '    <input class="input" id="cd-' + theme + '-radius" type="number" min="0" max="40" placeholder="默认 ' + def.radius + '"></div>',
+        '</div>',
+      ].join('');
+    };
 
     const body = openDialog({
       title: '格子样式',
       body: [
         '<div class="field"><label>格子名称（多图标分组时显示）</label>',
         '<input class="input" id="c-name" placeholder="例如：常用工具" spellcheck="false"></div>',
-        '<div class="row-2">',
-        '<div class="field"><label>背景色</label><div class="color-field">',
-        '<input type="color" id="c-bg-pick" value="' + (hexOrEmpty(st.bg) || '#262829') + '" style="width:34px;height:32px;padding:0;border:1px solid rgba(255,255,255,.1);border-radius:7px;background:transparent;cursor:pointer">',
-        '<input class="input" id="c-bg" placeholder="留空为默认" spellcheck="false"></div></div>',
-        '<div class="field"><label>边框色</label><div class="color-field">',
-        '<input type="color" id="c-border-pick" value="' + (hexOrEmpty(st.border) || '#2b2e30') + '" style="width:34px;height:32px;padding:0;border:1px solid rgba(255,255,255,.1);border-radius:7px;background:transparent;cursor:pointer">',
-        '<input class="input" id="c-border" placeholder="留空为默认" spellcheck="false"></div></div>',
+        '<div class="cell-style-pair">',
+        themeBlock('dark', '深色模式', '🌙', DEFAULT_CELL_STYLE.dark),
+        themeBlock('light', '浅色模式', '☀️', DEFAULT_CELL_STYLE.light),
         '</div>',
-        '<div class="field"><label>圆角（px）</label>',
-        '<input class="input" id="c-radius" type="number" min="0" max="40" placeholder="12" spellcheck="false"></div>',
       ].join(''),
       buttons: [
         { label: '取消', ghost: true },
         { label: '保存', primary: true, onClick: () => {
           pushHistory();
-          const name = trim(body.querySelector('#c-name').value);
-          const bg = hexOrEmpty(body.querySelector('#c-bg').value);
-          const border = hexOrEmpty(body.querySelector('#c-border').value);
-          const radiusRaw = trim(body.querySelector('#c-radius').value);
-          const style = {};
-          if (bg) style.bg = bg;
-          if (border) style.border = border;
-          if (radiusRaw !== '') style.radius = Number(radiusRaw);
-          cell.name = name;
-          cell.style = style;
+          cell.name = trim(body.querySelector('#c-name').value);
+          ['dark', 'light'].forEach((theme) => {
+            const t = {};
+            const bg = hexOrEmpty(body.querySelector('#cd-' + theme + '-bg').value);
+            const border = hexOrEmpty(body.querySelector('#cd-' + theme + '-border').value);
+            const radiusRaw = trim(body.querySelector('#cd-' + theme + '-radius').value);
+            if (bg) t.bg = bg;
+            if (border) t.border = border;
+            if (radiusRaw !== '') t.radius = Number(radiusRaw);
+            st[theme] = t;
+          });
           scheduleSave();
           render();
           return true;
@@ -2553,11 +2997,13 @@
     });
 
     body.querySelector('#c-name').value = cell.name || '';
-    body.querySelector('#c-bg').value = hexOrEmpty(st.bg) || '';
-    body.querySelector('#c-border').value = hexOrEmpty(st.border) || '';
-    body.querySelector('#c-radius').value = st.radius != null ? String(st.radius) : '';
-    bindColorPair('#c-bg', '#c-bg-pick');
-    bindColorPair('#c-border', '#c-border-pick');
+    ['dark', 'light'].forEach((theme) => {
+      body.querySelector('#cd-' + theme + '-bg').value = hexOrEmpty(st[theme].bg) || '';
+      body.querySelector('#cd-' + theme + '-border').value = hexOrEmpty(st[theme].border) || '';
+      body.querySelector('#cd-' + theme + '-radius').value = st[theme].radius != null ? String(st[theme].radius) : '';
+      bindColorPair('#cd-' + theme + '-bg', '#cd-' + theme + '-bg-pick');
+      bindColorPair('#cd-' + theme + '-border', '#cd-' + theme + '-border-pick');
+    });
   }
 
   function openHeaderDialog(axis, id) {
@@ -2639,7 +3085,7 @@
       const onMove = (e) => {
         if (!mode) {
           if (Math.hypot(e.clientX - startX, e.clientY - startY) < 7) return;
-          if (state.settings.locked) { blocked = true; toast('布局已锁定，点顶栏锁按钮解锁后再拖动', 'err'); return; }
+          if (state.settings.locked) { blocked = true; toast('布局已锁定，点上方锁按钮解锁后再拖动', 'err'); return; }
           mode = 'reorder';
           ghost = makeGhost(node);
           node.classList.add('is-dragging');
@@ -2689,7 +3135,12 @@
         dwell.reset();
 
         if (blocked) return; // 锁定下的拖动尝试：不启动也不移动
-        if (!mode) { launchItem(item); return; }
+        if (!mode) {
+          // 复用图标模式：点文件夹里的图标 = 取它的图标给右键的那个应用，不启动
+          if (ui.reuseIcon) { applyReuseIcon(item, ui.reuseIcon.itemId); return; }
+          launchItem(item);
+          return;
+        }
 
         if (mode === 'reorder') {
           node.classList.remove('is-dragging');
@@ -2819,8 +3270,18 @@
     if (api.onWindowState) {
       api.onWindowState((s) => {
         const btn = $('btn-max');
-        if (btn) btn.title = s && s.maximized ? '还原' : '最大化';
+        if (!btn) return;
+        const max = !!(s && s.maximized);
+        btn.classList.toggle('maximized', max);
+        btn.title = max ? '还原' : '最大化';
       });
+    }
+
+    // 右下角休息状态：点击进入设置页的「休息」页签
+    const tbRest = $('tb-rest');
+    if (tbRest) {
+      tbRest.addEventListener('click', () => openSettings('rest'));
+      tbRest.title = '点击进入休息设置';
     }
 
     // 搜索：全局搜索所有页，结果渲染成一个独立的临时「搜索结果」页
@@ -2880,45 +3341,70 @@
     $('btn-lock').addEventListener('click', toggleLock);
     updateLockBtn();
 
-    // 侧栏底部齿轮：进入 / 退出设置页
+    // 标题栏左侧按钮：展开 / 折叠侧边栏（折叠后只显示图标）
+    const btnSidebar = $('btn-sidebar');
+    if (btnSidebar) {
+      btnSidebar.addEventListener('click', () => {
+        const show = state.settings.sidebar === false;
+        state.settings.sidebar = show;
+        el.sidebar.classList.toggle('collapsed', !show);
+        btnSidebar.title = show ? '折叠侧边栏（只显示图标）' : '展开侧边栏';
+        scheduleSave();
+      });
+    }
+
+    // 标题栏主题切换：太阳 / 月亮，点击直接在浅色与深色之间切换（不再跟随系统）
+    const btnTheme = $('btn-theme');
+    if (btnTheme) {
+      btnTheme.addEventListener('click', () => {
+        const dark = (document.documentElement.dataset.theme || 'dark') === 'dark';
+        const source = dark ? 'light' : 'dark';
+        pushHistory();
+        state.settings.theme = source;
+        scheduleSave();
+        // 先应用主题再重渲染：格子样式是按当前主题取的，顺序反了就会用旧配色
+        const apply = (t) => { applyThemeDom(t); render(); };
+        if (api.theme) api.theme.set(source).then(apply).catch(() => apply({ source, dark: !dark }));
+        else apply({ source, dark: !dark });
+      });
+    }
+
+    // 侧栏底部「设置」：进入 / 退出设置页
     $('btn-settings').addEventListener('click', () => {
       if (ui.settingsOpen) closeSettings();
       else openSettings();
     });
 
-    // 侧边栏：点击持久显隐；隐藏状态下悬停按钮可临时弹出使用
-    const btnSidebar = $('btn-sidebar');
-    btnSidebar.addEventListener('click', () => {
-      const show = state.settings.sidebar === false;
-      state.settings.sidebar = show;
-      el.sidebar.classList.toggle('hidden', !show);
-      ui.tempSidebar = false;
-      ui.noTempUntilLeave = !show; // 刚主动隐藏，需移开鼠标再悬停才临时弹出
-      scheduleSave();
-    });
-    btnSidebar.addEventListener('mouseenter', () => {
-      if (state.settings.sidebar !== false || ui.noTempUntilLeave) return;
-      clearTimeout(ui.tempTimer);
-      if (el.sidebar.classList.contains('hidden')) {
-        el.sidebar.classList.remove('hidden');
-        ui.tempSidebar = true;
-      }
-    });
-    btnSidebar.addEventListener('mouseleave', () => {
-      ui.noTempUntilLeave = false;
-      scheduleTempHide();
-    });
-    el.sidebar.addEventListener('mouseenter', () => clearTimeout(ui.tempTimer));
-    el.sidebar.addEventListener('mouseleave', scheduleTempHide);
+    // 侧栏「快速启动」：从设置页或搜索页回到宫格
+    const btnQuick = $('btn-quickstart');
+    if (btnQuick) {
+      btnQuick.addEventListener('click', () => {
+        if (ui.searchPage) { toggleSearch(false); return; }
+        if (ui.settingsOpen) { closeSettings(); return; }
+        render();
+      });
+    }
 
-    // 侧边栏空白处右键：增加一页应用（页项自己的右键菜单优先）
-    el.sidebar.addEventListener('contextmenu', (e) => {
-      if (e.target.closest('.page-item')) return;
-      e.preventDefault();
-      openMenu(e.clientX, e.clientY, [
-        { label: '增加一页应用', action: () => addPage() },
-      ]);
-    });
+    // 鼠标滚轮在分页按钮上滚动：上下滚 → 左右滚（页签超出宽度时横向翻动）
+    if (el.pageTabs) {
+      el.pageTabs.addEventListener('wheel', (e) => {
+        const delta = Math.abs(e.deltaY) > Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+        if (!delta || el.pageTabs.scrollWidth <= el.pageTabs.clientWidth) return;
+        e.preventDefault();
+        el.pageTabs.scrollLeft += delta;
+      }, { passive: false });
+    }
+
+    // 分页工具条空白处右键：增加一页应用（页签自己的右键菜单优先）
+    if (el.pageTabs) {
+      el.pageTabs.addEventListener('contextmenu', (e) => {
+        if (e.target.closest('.page-tab') || e.target.closest('.page-add')) return;
+        e.preventDefault();
+        openMenu(e.clientX, e.clientY, [
+          { label: '增加一页应用', action: () => addPage() },
+        ]);
+      });
+    }
 
     // 搜索按钮：点击展开为搜索框 / 再点收起
     $('btn-search').addEventListener('click', () => toggleSearch());
@@ -2932,27 +3418,67 @@
       openHeaderDialog(head.dataset.axis, head.dataset.id);
     });
 
+    if (el.pageTabs) {
+      // 悬停页签 → Delete 删除整页（用委托，页签会被频繁重建）
+      el.pageTabs.addEventListener('pointerover', (e) => {
+        const tab = e.target.closest('.page-tab');
+        if (tab && tab.dataset.id && !ui.searchPage && !ui.settingsOpen) {
+          ui.hoverStruct = { kind: 'page', id: tab.dataset.id };
+        }
+      });
+      el.pageTabs.addEventListener('pointerleave', () => {
+        if (ui.hoverStruct && ui.hoverStruct.kind === 'page') ui.hoverStruct = null;
+      });
+    }
+
     // 记录鼠标当前悬停的图标（供 Delete 键删除）
     el.grid.addEventListener('pointerover', (e) => {
       const iconNode = e.target.closest('.icon');
-      if (!iconNode) return;
-      const cellNode = iconNode.closest('.cell');
+      const target = e.target;
+      // 结构目标：行标题 / 列标题 / 格子（Delete 键删除整行整列、清空格子）
+      const headNode = target.closest('[data-axis]');
+      const cellNode = target.closest('.cell');
+      if (headNode) {
+        ui.hoverStruct = { kind: headNode.dataset.axis, id: headNode.dataset.id };
+      } else if (cellNode) {
+        ui.hoverStruct = { kind: 'cell', key: cellNode.dataset.key };
+      } else {
+        ui.hoverStruct = null;
+      }
+
+      // 离开图标就必须清空，否则鼠标移到行列标题 / 格子上按 Delete 会删掉最后碰过的图标
+      if (!iconNode) { ui.hoverItem = null; return; }
+      const cellOfIcon = iconNode.closest('.cell');
       ui.hoverItem = {
         itemId: iconNode.dataset.item || '',
-        cellKey: cellNode ? cellNode.dataset.key : null,
+        cellKey: cellOfIcon ? cellOfIcon.dataset.key : null,
       };
     });
-    el.grid.addEventListener('pointerleave', () => { ui.hoverItem = null; });
+    el.grid.addEventListener('pointerleave', () => { ui.hoverItem = null; ui.hoverStruct = null; });
 
-    // 左上角「行列转置」按钮（搜索页为只读合成页，不参与）
+    // 左上角四宫格工具（搜索页为只读合成页，不参与）
     el.grid.addEventListener('click', (e) => {
-      if (!e.target.closest('.corner-transpose')) return;
+      const btn = e.target.closest('.corner-btn');
+      if (!btn) return;
       if (ui.searchPage || !el.overlay.classList.contains('hidden')) return;
-      transposePage();
+      const action = btn.dataset.action;
+      if (action === 'transpose') { transposePage(); return; }
+      if (action === 'rev-cols') { reverseCols(); return; }
+      if (action === 'rev-rows') { reverseRows(); return; }
+      if (action === 'clear-page') {
+        const page = curPage();
+        if (!page) return;
+        const n = pageItemCount(page);
+        if (!n) { toast('本页没有应用可清空', 'err'); return; }
+        confirmDialog('清空整页应用？', '「' + (page.name || '未命名') + '」' + countText(n) + '，行列与页面会保留，可用 ' + shortcutHint('undo') + ' 撤销。', '清空', () => clearPageItems());
+      }
     });
 
     el.grid.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
+
+      // 复用图标模式下点到空白处：退出拾取模式（点图标/文件夹继续走复制逻辑）
+      if (ui.reuseIcon && !e.target.closest('.icon') && !e.target.closest('.folder')) cancelReuseIcon();
 
       // 搜索结果页是只读的：只允许点按启动，不能拖拽 / 添加
       if (ui.searchPage) {
@@ -3058,7 +3584,7 @@
       const cell = e.target.closest('.cell');
       if (cell) cell.classList.remove('drop-hover');
     });
-    el.canvas.addEventListener('drop', (e) => {
+    el.canvas.addEventListener('drop', async (e) => {
       e.preventDefault();
       // 设置页 / 搜索结果页只读：不允许把文件加进去
       if (ui.settingsOpen) return;
@@ -3078,11 +3604,22 @@
       }
       const targetCell = cellOf(key, true);
       pushHistory();
-      paths.forEach((p) => {
+      // .lnk 快捷方式：名字用 .lnk 文件名，目标指向它真实指向的程序
+      const resolved = await Promise.all(paths.map(async (p) => {
+        let target = p;
+        if (api.resolveShortcut) {
+          try {
+            const info = await api.resolveShortcut(p);
+            if (info && info.target) target = info.target;
+          } catch (_) {}
+        }
+        return { name: baseName(p), target };
+      }));
+      resolved.forEach((r) => {
         targetCell.items.push({
           id: Grid.newId('i'),
-          name: baseName(p),
-          target: p,
+          name: r.name,
+          target: r.target,
           args: '',
           cwd: '',
           icon: { type: 'auto', value: '' },
@@ -3091,7 +3628,7 @@
       scheduleSave();
       render();
       requestIcons();
-      toast('已添加 ' + paths.length + ' 个快捷方式', 'ok');
+      toast('已添加 ' + resolved.length + ' 个快捷方式', 'ok');
     });
 
     // 全局关闭菜单 / 弹窗
@@ -3152,9 +3689,19 @@
 
       // 关闭 / 取消（Esc）：全局生效
       if (str === shortcuts.cancel) {
+        if (ui.reuseIcon) { cancelReuseIcon(); return; }
         closeMenu();
         if (!el.overlay.classList.contains('hidden')) closeDialog();
-        if (ui.settingsOpen) closeSettings();
+        if (ui.settingsOpen) {
+          // 设置页搜索展开时，Esc 先收起搜索框；再按才退出设置页
+          if (ui.settingsSearchOpen) {
+            ui.settingsSearchOpen = false;
+            ui.settingsQuery = '';
+            render();
+          } else {
+            closeSettings();
+          }
+        }
         if (document.activeElement === search || ui.searchPage) {
           toggleSearch(false);
           search.blur();
@@ -3181,7 +3728,9 @@
       if (str === shortcuts.delete && !ui.settingsOpen && !ui.searchPage) {
         const overlayHidden = el.overlay.classList.contains('hidden');
         if (overlayHidden || ui.folderDialogKey !== null) {
-          if (confirmDeleteHovered()) e.preventDefault();
+          // 先删悬停的图标；没有图标时，按悬停的页签 / 行标题 / 列标题 / 格子分别删除
+          if (confirmDeleteHovered()) { e.preventDefault(); return; }
+          if (overlayHidden && confirmDeleteHoveredStruct()) { e.preventDefault(); return; }
           return;
         }
       }
@@ -3210,19 +3759,7 @@
     });
   }
 
-  // 侧边栏临时显示的延迟收回
-  function scheduleTempHide() {
-    if (!ui.tempSidebar) return;
-    clearTimeout(ui.tempTimer);
-    ui.tempTimer = setTimeout(() => {
-      if (ui.tempSidebar && !el.sidebar.matches(':hover') && !$('btn-sidebar').matches(':hover')) {
-        el.sidebar.classList.add('hidden');
-        ui.tempSidebar = false;
-      }
-    }, 300);
-  }
-
-  // 标题栏搜索：搜索按钮展开成输入框；收起时退出搜索并恢复真实页
+  // 搜索：搜索按钮展开成输入框；收起时退出搜索并恢复真实页
   function toggleSearch(force) {
     const show = force === true ? true : force === false ? false : el.tbSearch.classList.contains('hidden');
     el.tbSearch.classList.toggle('hidden', !show);
@@ -3250,17 +3787,23 @@
     el.dialogFoot = $('dialog-foot');
     el.hint = $('hint');
     el.sidebar = $('sidebar');
-    el.pageList = $('page-list');
+    el.pageBar = $('page-bar');
+    el.pageTabs = $('page-tabs');
     el.tbSearch = $('tb-search');
 
     const saved = await api.loadData();
     state = normalize(saved) || defaults();
     ui.activeCell = firstCellKey();
-    el.sidebar.classList.toggle('hidden', state.settings.sidebar === false);
+    el.sidebar.classList.toggle('collapsed', state.settings.sidebar === false);
+    const sbBtn = $('btn-sidebar');
+    if (sbBtn) sbBtn.title = state.settings.sidebar === false ? '展开侧边栏' : '折叠侧边栏（只显示图标）';
 
     bindEvents();
     render();
     requestIcons();
+
+    // 贴边自动收起：启动时把设置同步到主进程（主进程 initEdgeSnap 只在 Electron 下生效）
+    if (api.edgeSnap && isElectron) api.edgeSnap.set(!!state.settings.edgeSnap).catch(() => {});
 
     // 标题栏居中展示休息提醒状态（订阅 + 首帧轮询）
     restApi.getStatus().then(paintTbRest).catch(() => {});
@@ -3268,8 +3811,8 @@
 
     // 主题：读当前配置并订阅系统变化
     applyCurrentTheme();
-    if (api.theme) api.theme.onChange((t) => applyThemeDom(t));
-    if (api.theme) api.theme.get().then((t) => applyThemeDom(t)).catch(() => {});
+    if (api.theme) api.theme.onChange((t) => { applyThemeDom(t); render(); });
+    if (api.theme) api.theme.get().then((t) => { applyThemeDom(t); render(); }).catch(() => {});
     else applyThemeDom({ source: state.settings.theme || 'system', dark: true });
 
     if (!isElectron) {

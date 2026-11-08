@@ -1,7 +1,7 @@
 {
   "name": "workbench",
   "productName": "工作台",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "个人工作台 - 图标宫格快捷启动",
   "main": "main.js",
@@ -23,6 +23,8 @@
       "renderer/**/*",
       "assets/**/*",
       "tools/icon-extract.ps1",
+      "tools/icon-shell.ps1",
+      "tools/lnk-target.ps1",
       "package.json"
     ],
     "win": {

@@ -9,34 +9,21 @@
 <body>
   <div class="titlebar" id="titlebar">
     <div class="tb-left">
-      <button class="tb-btn slim" id="btn-sidebar" title="显示 / 隐藏侧边栏">
+      <button class="tb-btn slim" id="btn-sidebar" title="折叠侧边栏（只显示图标）">
         <svg viewBox="0 0 16 16" width="15" height="15"><rect x="1.8" y="2.4" width="12.4" height="11.2" rx="2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M6.6 2.4v11.2" stroke="currentColor" stroke-width="1.2"/></svg>
       </button>
-      <button class="tb-btn slim" id="btn-search" title="搜索（/）">
-        <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.6 10.6l3.2 3.2" stroke="currentColor" stroke-width="1.3"/></svg>
+      <button class="tb-btn slim" id="btn-theme" title="切换浅色 / 深色">
+        <svg class="ico-sun" viewBox="0 0 16 16" width="15" height="15"><circle cx="8" cy="8" r="3.4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 1.2v1.6M8 13.2v1.6M1.2 8h1.6M13.2 8h1.6M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M12.8 3.2l-1.1 1.1M4.3 11.7l-1.1 1.1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+        <svg class="ico-moon" viewBox="0 0 16 16" width="15" height="15"><path d="M13.2 9.4a5.6 5.6 0 0 1-7.6-7 5.6 5.6 0 1 0 7.6 7z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
       </button>
-      <div class="search tb-search hidden" id="tb-search">
-        <svg viewBox="0 0 16 16" width="14" height="14" class="search-ico"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.6 10.6l3.2 3.2" stroke="currentColor" stroke-width="1.3"/></svg>
-        <input id="search" type="text" placeholder="搜索快捷方式…" autocomplete="off" spellcheck="false" />
-        <span class="kbd">esc</span>
-      </div>
-      <button class="tb-btn slim" id="btn-lock" title="锁定布局：禁止拖动图标">
-        <svg viewBox="0 0 16 16" width="14" height="14" class="ico-unlocked"><rect x="3.2" y="7" width="9.6" height="6.6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.4 7V5a2.6 2.6 0 0 1 5.1-.7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
-        <svg viewBox="0 0 16 16" width="14" height="14" class="ico-locked"><rect x="3.2" y="7" width="9.6" height="6.6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.4 7V5a2.6 2.6 0 0 1 5.2 0v2" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="10.3" r="1.1" fill="currentColor"/></svg>
-      </button>
-      <div class="size-box" title="图标大小">
-        <span>图标</span>
-        <input id="icon-size" type="range" min="36" max="76" step="2" />
-        <span class="size-tip" id="size-tip" aria-hidden="true">54px</span>
-      </div>
     </div>
-    <div class="tb-rest" id="tb-rest" title="电脑休息提醒状态"></div>
     <div class="tb-right">
       <button class="tb-btn" id="btn-min" title="最小化">
         <svg viewBox="0 0 12 12" width="12" height="12"><path d="M1 6h10" stroke="currentColor" stroke-width="1.1"/></svg>
       </button>
       <button class="tb-btn" id="btn-max" title="最大化">
-        <svg viewBox="0 0 12 12" width="12" height="12"><rect x="1.2" y="1.2" width="9.6" height="9.6" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+        <svg class="ico-max" viewBox="0 0 12 12" width="12" height="12"><rect x="1.2" y="1.2" width="9.6" height="9.6" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
+        <svg class="ico-restore" viewBox="0 0 12 12" width="12" height="12"><rect x="2.6" y="1.2" width="8.2" height="8.2" fill="none" stroke="currentColor" stroke-width="1.1"/><rect x="1.2" y="2.6" width="8.2" height="8.2" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>
       </button>
       <button class="tb-btn close" id="btn-close" title="关闭">
         <svg viewBox="0 0 12 12" width="12" height="12"><path d="M1.6 1.6l8.8 8.8M10.4 1.6L1.6 10.4" stroke="currentColor" stroke-width="1.1"/></svg>
@@ -46,19 +33,48 @@
 
   <div class="body-row">
     <aside class="sidebar" id="sidebar">
-      <div class="page-list" id="page-list"></div>
-      <div class="sidebar-foot">
-        <button class="tb-btn slim" id="btn-settings" title="设置">
-          <svg viewBox="0 0 16 16" width="15" height="15"><path d="M6.7 1.8h2.6l.4 1.8c.5.2 1 .5 1.4.9l1.8-.5 1.3 2.3-1.3 1.3c0 .3.1.5.1.8s0 .5-.1.8l1.3 1.3-1.3 2.3-1.8-.5c-.4.4-.9.7-1.4.9l-.4 1.8H6.7l-.4-1.8c-.5-.2-1-.5-1.4-.9l-1.8.5-1.3-2.3 1.3-1.3c-.1-.3-.1-.5-.1-.8s0-.5.1-.8L1.8 6.3 3.1 4l1.8.5c.4-.4.9-.7 1.4-.9l.4-1.8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><circle cx="8" cy="8.4" r="2.1" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
-        </button>
-      </div>
+      <button class="side-nav" id="btn-quickstart" title="快速启动">
+        <svg viewBox="0 0 16 16" width="14" height="14"><rect x="1.6" y="1.6" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="9.4" y="1.6" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="1.6" y="9.4" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="9.4" y="9.4" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+        <span>快速启动</span>
+      </button>
+      <button class="side-nav side-foot" id="btn-settings" title="设置">
+        <svg viewBox="0 0 16 16" width="14" height="14"><path d="M6.7 1.8h2.6l.4 1.8c.5.2 1 .5 1.4.9l1.8-.5 1.3 2.3-1.3 1.3c0 .3.1.5.1.8s0 .5-.1.8l1.3 1.3-1.3 2.3-1.8-.5c-.4.4-.9.7-1.4.9l-.4 1.8H6.7l-.4-1.8c-.5-.2-1-.5-1.4-.9l-1.8.5-1.3-2.3 1.3-1.3c-.1-.3-.1-.5-.1-.8s0-.5.1-.8L1.8 6.3 3.1 4l1.8.5c.4-.4.9-.7 1.4-.9l.4-1.8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><circle cx="8" cy="8.4" r="2.1" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+        <span>设置</span>
+      </button>
     </aside>
-    <main class="canvas" id="canvas">
-      <div class="grid" id="grid"></div>
-    </main>
+    <div class="main-col">
+      <div class="page-bar" id="page-bar">
+        <div class="page-tabs" id="page-tabs"></div>
+        <div class="page-tools">
+          <button class="tb-btn slim" id="btn-search" title="搜索（/）">
+            <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.6 10.6l3.2 3.2" stroke="currentColor" stroke-width="1.3"/></svg>
+          </button>
+          <div class="search tb-search hidden" id="tb-search">
+            <svg viewBox="0 0 16 16" width="14" height="14" class="search-ico"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.6 10.6l3.2 3.2" stroke="currentColor" stroke-width="1.3"/></svg>
+            <input id="search" type="text" placeholder="搜索快捷方式…" autocomplete="off" spellcheck="false" />
+            <span class="kbd">esc</span>
+          </div>
+          <button class="tb-btn slim" id="btn-lock" title="锁定布局：禁止拖动图标">
+            <svg viewBox="0 0 16 16" width="14" height="14" class="ico-unlocked"><rect x="3.2" y="7" width="9.6" height="6.6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.4 7V5a2.6 2.6 0 0 1 5.1-.7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+            <svg viewBox="0 0 16 16" width="14" height="14" class="ico-locked"><rect x="3.2" y="7" width="9.6" height="6.6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.4 7V5a2.6 2.6 0 0 1 5.2 0v2" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="10.3" r="1.1" fill="currentColor"/></svg>
+          </button>
+          <div class="size-box" title="图标大小">
+            <span>图标</span>
+            <input id="icon-size" type="range" min="36" max="76" step="2" />
+            <span class="size-tip" id="size-tip" aria-hidden="true">54px</span>
+          </div>
+        </div>
+      </div>
+      <main class="canvas" id="canvas">
+        <div class="grid" id="grid"></div>
+      </main>
+    </div>
   </div>
 
   <footer class="hint" id="hint"></footer>
+
+  <!-- 休息提醒状态：窗口右下角 -->
+  <div class="tb-rest" id="tb-rest" title="电脑休息提醒状态"></div>
 
   <div class="overlay hidden" id="overlay">
     <div class="dialog" id="dialog" role="dialog" aria-modal="true">
