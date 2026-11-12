@@ -46,5 +46,6 @@ jobs:
           files: |
             dist/*.exe
             dist/*.blockmap
+            dist/latest.yml
           generate_release_notes: true
           fail_on_unmatched_files: true
