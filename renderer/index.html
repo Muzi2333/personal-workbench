@@ -18,6 +18,16 @@
       </button>
     </div>
     <div class="tb-right">
+      <div class="tb-update-wrap hidden" id="tb-update">
+        <button class="tb-btn" id="btn-update" title="更新">
+          <span class="update-dot" id="update-dot"></span>
+        </button>
+        <div class="update-tip" id="update-tip">
+          <b id="update-tip-title">发现新版本</b>
+          <span id="update-tip-desc"></span>
+          <em id="update-tip-action">点击执行更新</em>
+        </div>
+      </div>
       <button class="tb-btn" id="btn-min" title="最小化">
         <svg viewBox="0 0 12 12" width="12" height="12"><path d="M1 6h10" stroke="currentColor" stroke-width="1.1"/></svg>
       </button>
@@ -36,6 +46,18 @@
       <button class="side-nav" id="btn-quickstart" title="快速启动">
         <svg viewBox="0 0 16 16" width="14" height="14"><rect x="1.6" y="1.6" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="9.4" y="1.6" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="1.6" y="9.4" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="9.4" y="9.4" width="5" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
         <span>快速启动</span>
+      </button>
+      <button class="side-nav" id="btn-proxy" title="代理">
+        <svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 1.8c-2.5 0-4.6 1.9-4.9 4.3A3.2 3.2 0 0 0 4 12.5h8a2.9 2.9 0 0 0 .6-5.7A4.9 4.9 0 0 0 8 1.8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M5.4 9.6h5.2M8.4 7.9l2.2 1.7-2.2 1.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>代理</span>
+      </button>
+      <button class="side-nav" id="btn-browser" title="浏览器">
+        <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M2 8h12M8 2c2 2.2 2 9.8 0 12M8 2c-2 2.2-2 9.8 0 12" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+        <span>浏览器</span>
+      </button>
+      <button class="side-nav" id="btn-telegram" title="Telegram（网页版，跟随自身代理）">
+        <svg viewBox="0 0 16 16" width="14" height="14"><path d="M14.2 2.2L1.9 7.1c-.6.24-.58 1.1.03 1.3l3.1 1.05 1.2 3.7c.2.6.98.76 1.36.27l1.7-2.1 3.2 2.35c.5.37 1.22.1 1.35-.5l1.95-9.6c.14-.66-.44-1.2-1.06-1zM5.6 9.1l6.9-4.3c.16-.1.31.14.17.25l-5.6 5.1-.2 2.1-1.27-3.15z" fill="currentColor"/></svg>
+        <span>Telegram</span>
       </button>
       <button class="side-nav side-foot" id="btn-settings" title="设置">
         <svg viewBox="0 0 16 16" width="14" height="14"><path d="M6.7 1.8h2.6l.4 1.8c.5.2 1 .5 1.4.9l1.8-.5 1.3 2.3-1.3 1.3c0 .3.1.5.1.8s0 .5-.1.8l1.3 1.3-1.3 2.3-1.8-.5c-.4.4-.9.7-1.4.9l-.4 1.8H6.7l-.4-1.8c-.5-.2-1-.5-1.4-.9l-1.8.5-1.3-2.3 1.3-1.3c-.1-.3-.1-.5-.1-.8s0-.5.1-.8L1.8 6.3 3.1 4l1.8.5c.4-.4.9-.7 1.4-.9l.4-1.8z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><circle cx="8" cy="8.4" r="2.1" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
@@ -68,6 +90,120 @@
       <main class="canvas" id="canvas">
         <div class="grid" id="grid"></div>
       </main>
+      <div class="browser hidden" id="browser" aria-hidden="true">
+        <div class="br-tabs" id="br-tabs"></div>
+        <div class="browser-bar">
+          <button class="browser-btn" id="br-back" title="后退" disabled>
+            <svg viewBox="0 0 16 16" width="15" height="15"><path d="M10 3L5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button class="browser-btn" id="br-forward" title="前进" disabled>
+            <svg viewBox="0 0 16 16" width="15" height="15"><path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button class="browser-btn" id="br-reload" title="刷新">
+            <svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 8a5 5 0 0 1 8.7-3.3M13 8a5 5 0 0 1-8.7 3.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M11.7 2.4v2.3h-2.3M4.3 13.6v-2.3h2.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button class="browser-btn" id="br-home" title="主页">
+            <svg viewBox="0 0 16 16" width="15" height="15"><path d="M2.6 7.6L8 3l5.4 4.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 7v6h3.2v-3.4h1.6V13H12V7" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <div class="browser-addr">
+            <input id="br-addr" type="text" placeholder="输入网址或搜索内容，回车访问" spellcheck="false" autocomplete="off" />
+          </div>
+          <button class="browser-btn" id="br-go" title="前往">
+            <svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 8h9.2M8.6 4.2L12.6 8l-4 3.8" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button class="browser-btn" id="br-fav-add" title="将当前页加入收藏夹">
+            <svg viewBox="0 0 16 16" width="15" height="15"><path d="M8 2.2l1.7 3.6 3.9.5-2.9 2.7.8 3.9L8 11l-3.5 1.9.8-3.9L2.4 6.3l3.9-.5L8 2.2z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+          </button>
+          <button class="browser-btn" id="br-fav-list" title="收藏夹">
+            <svg viewBox="0 0 16 16" width="15" height="15"><path d="M3 3.5h10M3 8h10M3 12.5h10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          </button>
+          <button class="browser-btn" id="br-pwd" title="密码管理器">
+            <svg viewBox="0 0 16 16" width="15" height="15"><rect x="3" y="6" width="10" height="7.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M5 6V4.2a3 3 0 0 1 6 0V6" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="9.5" r="1.1" fill="currentColor"/><path d="M8 10.6V12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+          </button>
+          <button class="browser-btn" id="br-settings" title="浏览器设置">
+            <svg viewBox="0 0 16 16" width="15" height="15"><path d="M8 10.4a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8z" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M13.2 10.1a1.1 1.1 0 0 0 .22 1.21l.06.06a1.33 1.33 0 0 1 0 1.88 1.33 1.33 0 0 1-1.88 0l-.06-.06a1.1 1.1 0 0 0-1.21-.22 1.1 1.1 0 0 0-.67 1.01v.09a1.33 1.33 0 0 1-2.66 0v-.09a1.1 1.1 0 0 0-.72-1.01 1.1 1.1 0 0 0-1.21.22l-.06.06a1.33 1.33 0 0 1-1.88-1.88l.06-.06a1.1 1.1 0 0 0 .22-1.21 1.1 1.1 0 0 0-1.01-.67h-.09a1.33 1.33 0 0 1 0-2.66h.09a1.1 1.1 0 0 0 1.01-.67 1.1 1.1 0 0 0-.22-1.21l-.06-.06a1.33 1.33 0 0 1 1.88-1.88l.06.06a1.1 1.1 0 0 0 1.21.22h.05a1.1 1.1 0 0 0 .67-1.01v-.09a1.33 1.33 0 0 1 2.66 0v.09a1.1 1.1 0 0 0 .67 1.01 1.1 1.1 0 0 0 1.21-.22l.06-.06a1.33 1.33 0 0 1 1.88 1.88l-.06.06a1.1 1.1 0 0 0-.22 1.21v.05a1.1 1.1 0 0 0 1.01.67h.09a1.33 1.33 0 0 1 0 2.66h-.09a1.1 1.1 0 0 0-1.01.67z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+        <div class="br-bookmark-bar hidden" id="br-bookmark-bar"></div>
+        <div class="br-fav-panel hidden" id="br-fav-panel">
+          <div class="br-fav-head">
+            <span class="br-fav-head-title">收藏夹</span>
+            <div class="br-fav-head-actions">
+              <button class="br-fav-head-btn" id="br-fav-add" title="将此页添加到收藏夹">
+                <svg viewBox="0 0 16 16" width="15" height="15"><path d="M8 2.2l1.7 3.6 3.9.5-2.9 2.7.8 3.9L8 11l-3.5 1.9.8-3.9L2.4 6.3l3.9-.5L8 2.2z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>
+              </button>
+              <button class="br-fav-head-btn" id="br-fav-add-folder" title="添加文件夹">
+                <svg viewBox="0 0 16 16" width="15" height="15"><path d="M1.5 4.5a1 1 0 0 1 1-1h3l1.5 1.5h6a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-9.5a1 1 0 0 1-1-1v-6.5z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M8 7v3M6.5 8.5h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+              </button>
+              <button class="br-fav-head-btn" id="br-fav-search-toggle" title="搜索">
+                <svg viewBox="0 0 16 16" width="15" height="15"><circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10 10l3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+              </button>
+              <button class="br-fav-head-btn br-fav-more" id="br-fav-more" title="更多">···</button>
+              <button class="br-fav-close" id="br-fav-close" title="关闭">×</button>
+            </div>
+          </div>
+          <div class="br-fav-search hidden" id="br-fav-search-row">
+            <input id="br-fav-search" type="text" placeholder="搜索收藏夹…" spellcheck="false" autocomplete="off" />
+          </div>
+          <div class="br-fav-list" id="br-fav-list-body"></div>
+        </div>
+        <div class="br-pwd-panel hidden" id="br-pwd-panel">
+          <div class="br-pwd-head">
+            <span class="br-pwd-head-title">密码管理器</span>
+            <div class="br-pwd-head-actions">
+              <label class="br-pwd-switch" title="启用密码保存">
+                <input type="checkbox" id="br-pwd-save-toggle" />
+                <span class="br-pwd-switch-track"><span class="br-pwd-switch-thumb"></span></span>
+                <span class="br-pwd-switch-label">保存密码</span>
+              </label>
+              <button class="br-fav-head-btn" id="br-pwd-search-toggle" title="搜索">
+                <svg viewBox="0 0 16 16" width="15" height="15"><circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10 10l3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+              </button>
+              <button class="br-fav-head-btn" id="br-pwd-add" title="添加密码">
+                <svg viewBox="0 0 16 16" width="15" height="15"><path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+              </button>
+              <button class="br-fav-close" id="br-pwd-close" title="关闭">×</button>
+            </div>
+          </div>
+          <div class="br-fav-search hidden" id="br-pwd-search-row">
+            <input id="br-pwd-search" type="text" placeholder="搜索密码…" spellcheck="false" autocomplete="off" />
+          </div>
+          <div class="br-pwd-list" id="br-pwd-list-body"></div>
+          <div class="br-pwd-add-form hidden" id="br-pwd-add-form">
+            <div class="br-pwd-form-title">添加密码</div>
+            <div class="br-pwd-form-row"><label>网站</label><input id="br-pwd-in-site" type="text" placeholder="例如：10086.cn" /></div>
+            <div class="br-pwd-form-row"><label>用户名</label><input id="br-pwd-in-user" type="text" placeholder="用户名 / 手机号 / 邮箱" /></div>
+            <div class="br-pwd-form-row"><label>密码</label><input id="br-pwd-in-pass" type="password" placeholder="密码" /><button class="br-pwd-eye" id="br-pwd-in-eye" title="显示/隐藏">👁</button></div>
+            <div class="br-pwd-form-row"><label>备注</label><input id="br-pwd-in-note" type="text" placeholder="可选" /></div>
+            <div class="br-pwd-form-actions">
+              <button class="br-pwd-btn-cancel" id="br-pwd-cancel">取消</button>
+              <button class="br-pwd-btn-save" id="br-pwd-save">保存</button>
+            </div>
+          </div>
+        </div>
+        <div class="br-views" id="br-views"></div>
+        <div class="bm-page hidden" id="bm-page">
+          <div class="bm-head">
+            <div class="bm-title">收藏夹管理</div>
+            <div class="bm-head-actions">
+              <input class="bm-search" id="bm-search" type="text" placeholder="搜索收藏夹…" />
+              <button class="bm-head-btn" id="bm-add-url" title="添加书签">＋ 添加书签</button>
+              <button class="bm-head-btn" id="bm-add-folder" title="添加文件夹">＋ 文件夹</button>
+              <button class="bm-close" id="bm-close" title="关闭">✕</button>
+            </div>
+          </div>
+          <div class="bm-body">
+            <div class="bm-side"><div class="bm-side-list" id="bm-side-list"></div></div>
+            <div class="bm-main">
+              <div class="bm-main-head" id="bm-main-head">收藏夹栏</div>
+              <div class="bm-main-list" id="bm-main-list"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="telegram hidden" id="telegram" aria-hidden="true">
+        <div class="tg-views" id="tg-views"></div>
+      </div>
     </div>
   </div>
 

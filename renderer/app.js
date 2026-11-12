@@ -43,6 +43,12 @@
       pathForFile: () => '',
       win: { minimize() {}, toggleMax() {}, close() {} },
       onWindowState() {},
+      updates: {
+        check: async () => ({ ok: false, error: '预览模式不支持自动更新' }),
+        download: async () => ({ ok: false, error: '预览模式不支持自动更新' }),
+        install: async () => ({ ok: false, error: '预览模式不支持自动更新' }),
+        onState: () => {},
+      },
       rest: {
         getConfig: async () => {
           try { return Object.assign({}, REST_FALLBACK, JSON.parse(localStorage.getItem(FALLBACK_REST_KEY) || '{}')); } catch (_) { return Object.assign({}, REST_FALLBACK); }
@@ -73,6 +79,7 @@
   const isElectron = !!window.workbench;
   // 兼容旧版 preload（没有 rest 命名空间）与浏览器预览
   const restApi = api.rest || fallbackApi().rest;
+  const updatesApi = api.updates || fallbackApi().updates;
 
   /* --------------------------------- 工具函数 --------------------------------- */
 
@@ -115,12 +122,16 @@
     reuseIcon: null, // 「复用其他图标」：{ itemId } = 等待换图标的那个应用（右键菜单里的目标应用）
     folderDialogKey: null, // 当前打开的文件夹弹窗所在格子 key（用于文件夹内 Delete 删除）
     shortcutListening: null, // 正在录制快捷键的 action id（null = 未在录制）
+    sidebarShortcutListening: null, // 正在录制快捷键的侧边栏项 id（null = 未在录制）
     lastTap: { item: '', t: 0 },
     searchPage: null, // 搜索结果临时页（不落盘）
     settingsOpen: false, // 设置页（分页工具条齿轮进入，不落盘）
+    browserOpen: false,  // 内嵌浏览器视图（侧边栏「浏览器」进入，不落盘）
+    telegramOpen: false, // Telegram 网页版视图（侧边栏「Telegram」进入，不落盘）
+    proxyOpen: false,    // 代理管理视图（侧边栏「代理」进入，不落盘）
+    proxyTab: 'overview', // 代理页当前功能区：overview / proxies / subs / settings
     settingsTab: 'general', // 设置页当前标签：general / rest / app
     settingsQuery: '', // 设置页搜索词（不落盘）
-    settingsSearchOpen: false, // 设置页搜索框是否展开（点击图标展开）
     restShowPassword: false, // 设置页「显示密码」勾选状态
   };
 
@@ -151,11 +162,87 @@
   ];
   const SHORTCUT_DEFAULTS = SHORTCUT_DEFS.reduce((o, s) => { o[s.id] = s.def; return o; }, {});
 
+  /* ----------------------------- 侧边栏导航项 ----------------------------- */
+  // 侧边栏所有可配置项的元数据（id 对应 HTML 中 btn-{id}）
+  const SIDEBAR_ITEMS = [
+    { id: 'quickstart', name: '快速启动' },
+    { id: 'proxy',      name: '代理' },
+    { id: 'browser',    name: '浏览器' },
+    { id: 'telegram',   name: 'Telegram' },
+    { id: 'settings',   name: '设置' },
+  ];
+  // 侧边栏默认配置：顺序 / 置顶或置底 / 是否显示 / 快捷键
+  const DEFAULT_SIDEBAR_NAV = [
+    { id: 'quickstart', order: 1, position: 'top',    visible: true, shortcut: 'F1' },
+    { id: 'proxy',      order: 2, position: 'top',    visible: true, shortcut: 'F2' },
+    { id: 'browser',    order: 3, position: 'top',    visible: true, shortcut: 'F3' },
+    { id: 'telegram',   order: 4, position: 'top',    visible: true, shortcut: 'F4' },
+    { id: 'settings',   order: 5, position: 'bottom', visible: true, shortcut: 'F5' },
+  ];
+  // 把用户保存的侧边栏配置补齐为完整结构（不丢用户自定义）
+  function normalizeSidebarNav(raw) {
+    const map = {};
+    (raw || []).forEach((x) => { if (x && x.id) map[x.id] = x; });
+    return SIDEBAR_ITEMS.map((def) => {
+      const u = map[def.id] || {};
+      return {
+        id: def.id,
+        order: typeof u.order === 'number' ? u.order : DEFAULT_SIDEBAR_NAV.find((d) => d.id === def.id).order,
+        position: u.position === 'bottom' ? 'bottom' : 'top',
+        visible: u.visible === false ? false : true,
+        shortcut: typeof u.shortcut === 'string' ? u.shortcut : DEFAULT_SIDEBAR_NAV.find((d) => d.id === def.id).shortcut,
+      };
+    });
+  }
+  function getSidebarNav() {
+    return normalizeSidebarNav(state && state.settings && state.settings.sidebarNav);
+  }
+  // 侧边栏显示顺序：置顶组在前、置底组在后，组内按 order 升序（设置列表与真实侧栏共用）
+  function sortSidebarNav(nav) {
+    return nav.slice().sort((a, b) => {
+      if (a.position !== b.position) return a.position === 'top' ? -1 : 1;
+      return a.order - b.order;
+    });
+  }
+
   // 单元格统一样式（全局默认）：分深色 / 浅色两套；每个单元格可单独覆盖（留空则继承）
   const DEFAULT_CELL_STYLE = {
     dark:  { bg: '#262829', border: '#2b2e30', radius: 12 },
     light: { bg: '#ffffff', border: '#e4e7ed', radius: 12 },
   };
+
+  // 内嵌浏览器默认配置
+  const DEFAULT_BROWSER = {
+    enabled: true,            // 是否启用内嵌浏览器（关闭后侧边栏隐藏入口）
+    startup: 'newtab',        // 启动时：newtab 打开新标签页 / continue 继续上次 / custom 自定义网址
+    startupUrl: '',           // startup=custom 时的网址
+    homeButton: true,         // 工具栏是否显示「主页」按钮
+    homeAction: 'newtab',     // 主页按钮行为：newtab 新标签页 / custom 自定义网址
+    homeUrl: '',              // homeAction=custom 时的网址
+    newTab: 'homepage',       // 新建标签页打开：homepage 首页 / custom 自定义 / blank 空白页
+    newTabUrl: '',            // newTab=custom 时的网址
+    openLinksInApp: true,     // 网址快捷方式默认用内嵌浏览器打开（否则走系统默认浏览器）
+    theme: 'system',          // 浏览器外观主题：system 跟随工作台 / light 浅色 / dark 深色
+    showFavBar: false,        // 是否在工具栏下方显示收藏夹栏
+    hideFavButtons: false,    // 是否隐藏工具栏上的收藏夹按钮
+    savePasswords: true,      // 是否启用密码保存（密码管理器总开关）
+    passwords: [],            // 已保存的密码：[{ id, site, username, password, note, addedAt }]
+    // 收藏夹树形结构：根节点为文件夹，children 可嵌套文件夹或书签
+    bookmarks: [
+      { id: 'fav-bar', type: 'folder', title: '收藏夹栏', children: [] },
+      { id: 'fav-other', type: 'folder', title: '其他书签', children: [] },
+    ],
+  };
+
+  // Telegram 配置（内嵌 Telegram 网页版相关）
+  const DEFAULT_TELEGRAM = {
+    enabled: true,        // 自动保存媒体到本地（主开关）
+    saveMediaPath: '',    // 空 = 系统下载目录下的 Telegram 子目录；否则使用自定义绝对路径
+  };
+  function telegramConfig() {
+    const t = state && state.settings && state.settings.telegram;
+    return Object.assign({}, DEFAULT_TELEGRAM, t || {});
+  }
 
   function getShortcuts() {
     const s = (state && state.settings && state.settings.shortcuts) || {};
@@ -265,7 +352,7 @@
       version: 3,
       pages: [{ id: 'p1', name: '主页', rows, cols, cells, layout: { gap: 10 } }],
       activePage: 'p1',
-      settings: { iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false, theme: 'system', headStyle: 'solid', gap: 10, headRadius: 8, edgeSnap: false, shortcuts: Object.assign({}, SHORTCUT_DEFAULTS), cellStyle: Object.assign({}, DEFAULT_CELL_STYLE) },
+      settings: { iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false, theme: 'system', headStyle: 'solid', gap: 10, headRadius: 8, edgeSnap: false, autoUpdate: false, shortcuts: Object.assign({}, SHORTCUT_DEFAULTS), sidebarNav: JSON.parse(JSON.stringify(DEFAULT_SIDEBAR_NAV)), cellStyle: Object.assign({}, DEFAULT_CELL_STYLE), browser: Object.assign({}, DEFAULT_BROWSER), telegram: Object.assign({}, DEFAULT_TELEGRAM) },
       iconCache: {},
     };
   }
@@ -333,14 +420,35 @@
 
     if (!data.pages.some((p) => p.id === data.activePage)) data.activePage = data.pages[0].id;
 
-    data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false, theme: 'system', headStyle: 'solid', gap: 10, headRadius: 8, edgeSnap: false }, data.settings || {});
+    data.settings = Object.assign({ iconSize: 54, showLabels: true, launch: 'double', sidebar: true, undoLimit: 100, locked: false, theme: 'system', headStyle: 'solid', gap: 10, headRadius: 8, edgeSnap: false, autoUpdate: false }, data.settings || {});
     // 快捷键：补齐缺失项（新增的快捷键自动用默认值），不覆盖用户已自定义的
     data.settings.shortcuts = Object.assign({}, SHORTCUT_DEFAULTS, data.settings.shortcuts || {});
+    // 侧边栏导航配置：补齐顺序 / 位置 / 可见性 / 快捷键
+    data.settings.sidebarNav = normalizeSidebarNav(data.settings.sidebarNav);
     // 单元格统一样式：补齐深浅色两套，各自再内部补齐字段
     const cs = data.settings.cellStyle || {};
     cs.dark = Object.assign({}, DEFAULT_CELL_STYLE.dark, cs.dark || {});
     cs.light = Object.assign({}, DEFAULT_CELL_STYLE.light, cs.light || {});
     data.settings.cellStyle = cs;
+    // 内嵌浏览器：补齐默认配置（旧数据无此字段时自动启用）
+    data.settings.browser = Object.assign({}, DEFAULT_BROWSER, data.settings.browser || {});
+    // Telegram：补齐默认配置（旧数据无此字段时自动启用）
+    data.settings.telegram = Object.assign({}, DEFAULT_TELEGRAM, data.settings.telegram || {});
+    // 收藏夹数据迁移：旧版为扁平数组 [{id,title,url,folder}]，新版为树形结构
+    const bm = data.settings.browser.bookmarks;
+    if (Array.isArray(bm) && bm.length && bm[0] && bm[0].type !== 'folder') {
+      const bar = { id: 'fav-bar', type: 'folder', title: '收藏夹栏', children: [] };
+      const other = { id: 'fav-other', type: 'folder', title: '其他书签', children: [] };
+      bm.forEach((x) => {
+        const node = { id: x.id, type: 'url', title: x.title || x.url, url: x.url, addedAt: x.addedAt || Date.now() };
+        if (x.folder && x.folder !== '未分类' && x.folder !== 'Edge 导入') {
+          bar.children.push(node);
+        } else {
+          other.children.push(node);
+        }
+      });
+      data.settings.browser.bookmarks = [bar, other];
+    }
     data.iconCache = data.iconCache || {};
     // 图标缓存版本：修复打包版 256px 提取脚本缺失（此前一直落 48px 模糊兜底），清缓存重取
     // v7：文件夹 / 文件夹快捷方式统一改用文件夹图标，清掉历史缓存让它们重新提取
@@ -383,12 +491,35 @@
   }
 
   function render() {
+    ui.hoverStruct = null;
+    applyBrowserTheme();
+    // 浏览器视图：覆盖宫格区域，隐藏分页工具条与画布
+    if (ui.browserOpen) {
+      if (el.canvas) el.canvas.classList.add('hidden');
+      if (el.pageBar) el.pageBar.classList.add('hidden');
+      if (el.telegram) el.telegram.classList.add('hidden');
+      if (el.browser) el.browser.classList.remove('hidden');
+      renderBookmarkBar();
+      renderSidebar();
+      return;
+    }
+    // Telegram 视图：独立 webview 覆盖宫格区域
+    if (ui.telegramOpen) {
+      if (el.canvas) el.canvas.classList.add('hidden');
+      if (el.pageBar) el.pageBar.classList.add('hidden');
+      if (el.browser) el.browser.classList.add('hidden');
+      if (el.telegram) el.telegram.classList.remove('hidden');
+      renderSidebar();
+      return;
+    }
+    if (el.telegram) el.telegram.classList.add('hidden');
+    if (el.browser) el.browser.classList.add('hidden');
+    if (el.canvas) el.canvas.classList.remove('hidden');
     const canvas = el.canvas;
     const sx = canvas.scrollLeft;
     const sy = canvas.scrollTop;
-    // 重渲染会销毁旧节点，悬停记录必须先清掉，否则 Delete 会作用到已经不存在的目标
-    ui.hoverStruct = null;
     if (ui.settingsOpen) renderSettingsPage();
+    else if (ui.proxyOpen) renderProxyPage();
     else Grid.render(el.grid, viewPage(), state);
     canvas.scrollLeft = sx;
     canvas.scrollTop = sy;
@@ -401,13 +532,14 @@
   function openSettings(tab) {
     cancelReuseIcon(true);
     exitSearch(true);
+    if (ui.proxyOpen) closeProxy();
+    if (ui.telegramOpen) closeTelegram();
     const s = $('search');
     if (s) s.value = '';
     el.tbSearch.classList.add('hidden');
     $('btn-search').classList.remove('hidden');
     if (tab) ui.settingsTab = tab;
     ui.settingsOpen = true;
-    ui.settingsSearchOpen = false;
     ui.settingsQuery = '';
     render();
     // 配置从主进程读取；读回后刷新当前设置页（失败则保留默认缓存）
@@ -421,9 +553,2182 @@
     if (!ui.settingsOpen) return;
     stopRestStatusTimer();
     ui.settingsOpen = false;
-    ui.settingsSearchOpen = false;
     ui.settingsQuery = '';
     render();
+  }
+
+  /* ------------------------------ 内嵌浏览器 ------------------------------ */
+
+  const BROWSER_HOME = 'https://cn.bing.com';
+
+  // 上次浏览的页面 URL（同一会话内「继续上次页面」用；不持久化到配置）
+  let lastBrowserUrl = '';
+
+  // 标签页运行时状态（不持久化；每个标签对应一个独立 <webview>）
+  let browserTabs = [];       // [{ id, title, url, loading }]
+  let activeTabId = null;
+  let tabIdSeq = 0;
+
+  function activeTab() { return browserTabs.find((t) => t.id === activeTabId) || null; }
+  function activeWebview() {
+    const t = activeTab();
+    return t ? $('br-wv-' + t.id) : null;
+  }
+
+  // 根据浏览器设置计算各类网址
+  function browserConfig() { return (state && state.settings && state.settings.browser) || DEFAULT_BROWSER; }
+
+  function getHomeUrl() {
+    const b = browserConfig();
+    if (b.homeAction === 'custom') return trim(b.homeUrl) || BROWSER_HOME;
+    return BROWSER_HOME; // newtab → 首页
+  }
+
+  function getNewTabUrl() {
+    const b = browserConfig();
+    if (b.newTab === 'custom') return trim(b.newTabUrl) || BROWSER_HOME;
+    if (b.newTab === 'blank') return 'about:blank';
+    return BROWSER_HOME; // homepage → 首页
+  }
+
+  function getStartupUrl() {
+    const b = browserConfig();
+    if (b.startup === 'custom') return trim(b.startupUrl) || BROWSER_HOME;
+    if (b.startup === 'continue') return lastBrowserUrl || getNewTabUrl();
+    return getNewTabUrl(); // newtab → 新标签页
+  }
+
+  function openBrowser(url) {
+    // 未启用内嵌浏览器时不响应
+    const b = browserConfig();
+    if (b.enabled === false) return;
+    cancelReuseIcon(true);
+    exitSearch(true);
+    const s = $('search');
+    if (s) s.value = '';
+    el.tbSearch.classList.add('hidden');
+    const sb = $('btn-search');
+    if (sb) sb.classList.remove('hidden');
+    if (ui.proxyOpen) closeProxy();
+    if (ui.telegramOpen) closeTelegram();
+    ui.settingsOpen = false;
+    ui.browserOpen = true;
+    render();
+    // 没有标签则新建；指定了 URL 则新开标签加载；否则激活已有标签
+    if (browserTabs.length === 0) {
+      newTab(url || getStartupUrl(), true);
+    } else if (url) {
+      newTab(url, true);
+    } else {
+      switchTab(activeTabId);
+    }
+  }
+
+  function closeBrowser() {
+    if (!ui.browserOpen) return;
+    ui.browserOpen = false;
+    render();
+  }
+
+  /* ------------------------------ Telegram（官方网页版 Web K） ------------------------------ */
+  // 独立 webview + 独立持久化 partition（persist:telegram）：登录态与内置浏览器互不影响；
+  // 走自身代理由主进程 applySessionProxy 对该 partition 单独 setProxy 生效。
+
+  const TG_URL = 'https://web.telegram.org/k/';
+  let tgWebview = null;
+
+  function ensureTelegramWebview() {
+    if (tgWebview) return;
+    const host = $('tg-views');
+    if (!host) return;
+    const wv = document.createElement('webview');
+    wv.id = 'tg-wv';
+    wv.setAttribute('allowpopups', '');
+    wv.setAttribute('partition', 'persist:telegram');
+    wv.setAttribute('nodeintegration', '');
+    wv.setAttribute('contextisolation', 'false');
+    tgWebview = wv;
+
+    // 注入媒体拦截脚本：preload 必须在首次导航前设置好，所以先拿路径再设 src 并挂载
+    const tgApi = api.telegram;
+    const mount = () => { if (tgWebview === wv && !wv.parentNode) { wv.src = TG_URL; host.appendChild(wv); } };
+    if (tgApi && tgApi.preloadPath) {
+      tgApi.preloadPath().then((p) => {
+        try {
+          if (tgWebview === wv && p) wv.setAttribute('preload', encodeURI('file:///' + String(p).replace(/\\/g, '/')));
+        } catch (_) {}
+        mount();
+      }).catch(mount);
+      wv.addEventListener('ipc-message', (e) => {
+        if (e.channel === 'tg-media' && e.args && e.args[0]) {
+          tgApi.saveMedia(e.args[0]).then((r) => { if (r && r.ok) tgSavedToast(); }).catch(() => {});
+        }
+      });
+      // 把 webview/preload 的控制台日志转发到主窗口，方便排查
+      wv.addEventListener('console-message', (e) => {
+        console.log('[tg-webview]', e.message);
+      });
+    } else {
+      mount();
+    }
+  }
+
+  // 自动保存提示合并：短时间内大量媒体时只弹一次汇总
+  let tgSavedCount = 0;
+  let tgSavedTimer = null;
+  function tgSavedToast() {
+    tgSavedCount++;
+    clearTimeout(tgSavedTimer);
+    tgSavedTimer = setTimeout(() => {
+      toast('已自动保存 ' + tgSavedCount + ' 个媒体到「下载\\Telegram」', 'ok');
+      tgSavedCount = 0;
+    }, 1500);
+  }
+
+  function openTelegram() {
+    cancelReuseIcon(true);
+    exitSearch(true);
+    const s = $('search');
+    if (s) s.value = '';
+    el.tbSearch.classList.add('hidden');
+    $('btn-search').classList.remove('hidden');
+    if (ui.proxyOpen) closeProxy();
+    if (ui.browserOpen) closeBrowser();
+    ui.settingsOpen = false;
+    ui.telegramOpen = true;
+    render();
+    ensureTelegramWebview();
+  }
+
+  function closeTelegram() {
+    if (!ui.telegramOpen) return;
+    ui.telegramOpen = false;
+    render();
+  }
+
+  // 刷新：重新加载页面（保留登录态与缓存）
+  function reloadTelegram() {
+    if (!ui.telegramOpen) { openTelegram(); return; }
+    if (tgWebview) { try { tgWebview.reload(); } catch (_) {} }
+  }
+
+  // 重启：销毁 webview 重建（清掉运行时状态；partition 持久化，登录态仍在）
+  function restartTelegram() {
+    if (tgWebview) { try { tgWebview.remove(); } catch (_) {} tgWebview = null; }
+    if (ui.telegramOpen) ensureTelegramWebview();
+    else openTelegram();
+  }
+
+  function openTelegramMenu(x, y) {
+    openMenu(x, y, [
+      { label: '刷新', action: reloadTelegram },
+      { label: '重启', action: restartTelegram },
+    ]);
+  }
+
+  /* ------------------------------ 代理管理页面 ------------------------------ */
+
+  const proxyApi = api.proxy || null;
+
+  // 代理页运行时状态（不持久化；持久化状态在主进程 proxy-state.json）
+  const px = {
+    state: null,
+    proxies: null,
+    traffic: { up: 0, down: 0, count: 0 },
+    lastTraffic: null,
+    speed: { up: 0, down: 0 },
+    pollTimer: null,
+    downloading: false,
+    dlMessage: '',
+    activeGroup: '',
+    testingGroup: false,
+    testingMode: '',    // 'direct' | 'proxy' — 正在测速的类型
+    lastRunning: false,
+    autoTesting: false,
+    ipLoading: false,
+    ipInfo: null,       // { ip, country, region, city, org, isp }
+    testResults: {},    // { url: delayMs } — 网站测速结果缓存
+    _resolvedNow: null,
+  };
+
+  function pxEsc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  // 关键字数组 → 输入框显示文本（只接受非空字符串，Number/NaN/null 一律丢弃）
+  function kwText(arr) {
+    if (!Array.isArray(arr)) return '';
+    return arr
+      .filter((v) => typeof v === 'string' && v.trim() && v !== 'NaN' && v !== 'undefined' && v !== 'null')
+      .map((v) => v.trim())
+      .join(', ');
+  }
+
+  // 输入框文本 → 关键字数组
+  function kwSplit(text) {
+    return String(text == null ? '' : text)
+      .split(/[,，、;；\s\n\r]+/)
+      .map((s) => s.trim())
+      .filter((s) => s && s !== 'NaN' && s !== 'undefined' && s !== 'null');
+  }
+
+  function pxFmtBytes(n) {
+    n = Number(n) || 0;
+    if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+    return Math.round(n) + ' B';
+  }
+
+  function pxDelayText(d) { return d ? d + 'ms' : '超时'; }
+  function pxDelayClass(d) {
+    if (!d) return 'bad';
+    if (d < 300) return 'good';
+    if (d < 800) return 'mid';
+    return 'bad';
+  }
+
+  function openProxy() {
+    if (ui.proxyOpen) return;
+    cancelReuseIcon(true);
+    exitSearch(true);
+    stopRestStatusTimer();
+    const s = $('search');
+    if (s) s.value = '';
+    el.tbSearch.classList.add('hidden');
+    const sb = $('btn-search');
+    if (sb) sb.classList.remove('hidden');
+    ui.settingsOpen = false;
+    ui.browserOpen = false;
+    ui.telegramOpen = false;
+    if (el.telegram) el.telegram.classList.add('hidden');
+    if (el.browser) el.browser.classList.add('hidden');
+    ui.proxyOpen = true;
+    ui.proxyTab = 'overview';
+    render();
+    refreshProxyState(true);
+    startProxyPoll();
+  }
+
+  function closeProxy() {
+    if (!ui.proxyOpen) return;
+    stopProxyPoll();
+    ui.proxyOpen = false;
+    render();
+  }
+
+  // 通过代理查询出口 IP（ipinfo.io），用多个 API 做 fallback
+  async function fetchProxyIp() {
+    if (!proxyApi || !px.state || !px.state.running || px.ipLoading) return;
+    px.ipLoading = true;
+    // 不立即 render，等结果回来再触发；避免事件监听器被重建
+    try {
+      const sources = [
+        'https://ipinfo.io/json',
+        'https://api.ipify.org?format=json',
+        'https://ipapi.co/json/',
+        'http://ip-api.com/json/?lang=zh-CN',
+      ];
+      // 用主进程代理 fetch（通过 IPC）
+      if (proxyApi.fetchIpInfo) {
+        const r = await proxyApi.fetchIpInfo();
+        if (r && r.ok && r.data) {
+          px.ipInfo = r.data;
+          px.ipLoading = false;
+          if (ui.proxyOpen) render();
+          return;
+        }
+      }
+      px.ipInfo = null;
+    } catch (_) {
+      px.ipInfo = null;
+    } finally {
+      px.ipLoading = false;
+      if (ui.proxyOpen) render();
+    }
+  }
+
+  async function refreshProxyState(withProxies) {
+    if (!proxyApi) return;
+    try {
+      px.state = await proxyApi.getState();
+      const running = !!(px.state && px.state.running);
+      if (withProxies && running) {
+        const r = await proxyApi.getProxies();
+        px.proxies = r && r.ok ? r : null;
+        // 内核刚启动（false -> true）时自动测速并按延迟排序
+        if (!px.lastRunning && !px.autoTesting) {
+          px.autoTesting = true;
+          testActiveGroupAndSort('proxy').finally(() => { px.autoTesting = false; });
+        }
+      } else if (!running) {
+        px.proxies = null;
+      }
+      px.lastRunning = running;
+    } catch (_) {}
+    // 右下角代理胶囊随状态同步刷新
+    paintProxyPill($('tb-rest'));
+    if (ui.proxyOpen) render();
+  }
+
+  // 测试当前组全部节点延迟，并按延迟升序重排
+  // mode: 'direct' 直连测速（TCP 握手，不走代理）| 'proxy' 代理测速（mihomo /delay）
+  async function testActiveGroupAndSort(mode) {
+    if (!proxyApi) return { ok: false, error: '代理功能不可用' };
+    if (!px.activeGroup) return { ok: false, error: '请先选择节点分组' };
+    if (px.testingGroup) return { ok: false, error: '正在测速中…' };
+    const m = mode === 'direct' ? 'direct' : 'proxy';
+    px.testingGroup = true;
+    px.testingMode = m;
+    if (ui.proxyOpen) render();
+    let r = null;
+    try {
+      r = await proxyApi.testGroup(px.activeGroup, m);
+    } catch (err) {
+      r = { ok: false, error: String((err && err.message) || err) };
+    }
+    px.testingGroup = false;
+    px.testingMode = '';
+    if (r && r.ok) {
+      const delays = r.delays || {};
+      let hit = 0;
+      if (px.proxies && px.proxies.nodes) {
+        Object.keys(delays).forEach((name) => {
+          if (px.proxies.nodes[name]) { px.proxies.nodes[name].delay = delays[name]; hit++; }
+        });
+      }
+      r.hit = hit;
+    }
+    // 无论成功失败都要重建，保证按钮从"测速中…"恢复、结果立即出现
+    if (ui.proxyOpen) render();
+    return r;
+  }
+
+  function startProxyPoll() {
+    stopProxyPoll();
+    px.pollTimer = setInterval(pollProxyTraffic, 2000);
+    pollProxyTraffic();
+  }
+
+  function stopProxyPoll() {
+    if (px.pollTimer) { clearInterval(px.pollTimer); px.pollTimer = null; }
+  }
+
+  async function pollProxyTraffic() {
+    if (!proxyApi || !ui.proxyOpen) return;
+    let t = null;
+    try { t = await proxyApi.getTraffic(); } catch (_) { return; }
+    if (!t) return;
+    const now = Date.now();
+    if (px.lastTraffic && t.running) {
+      const dt = Math.max(0.5, (now - px.lastTraffic.t) / 1000);
+      px.speed = {
+        up: Math.max(0, (t.up - px.lastTraffic.up) / dt),
+        down: Math.max(0, (t.down - px.lastTraffic.down) / dt),
+      };
+    } else {
+      px.speed = { up: 0, down: 0 };
+    }
+    px.lastTraffic = { t: now, up: t.up, down: t.down };
+    px.traffic = { up: t.up, down: t.down, count: t.count };
+    paintProxyTraffic();
+  }
+
+  // 流量统计原地刷新（不重建整页，避免打断输入/滚动）
+  function paintProxyTraffic() {
+    if (!ui.proxyOpen) return;
+    const running = !!(px.state && px.state.running);
+    const up = $('px-t-up');
+    const down = $('px-t-down');
+    const cnt = $('px-t-count');
+    const sup = $('px-s-up');
+    const sdown = $('px-s-down');
+    if (up) up.textContent = running ? pxFmtBytes(px.traffic.up) : '—';
+    if (down) down.textContent = running ? pxFmtBytes(px.traffic.down) : '—';
+    if (cnt) cnt.textContent = running ? String(px.traffic.count) : '—';
+    if (sup) sup.textContent = running ? '↑ ' + pxFmtBytes(px.speed.up) + '/s' : '';
+    if (sdown) sdown.textContent = running ? '↓ ' + pxFmtBytes(px.speed.down) + '/s' : '';
+    // 侧边栏底部速度显示
+    const supFoot = $('px-s-up-foot');
+    const sdownFoot = $('px-s-down-foot');
+    if (supFoot) supFoot.textContent = running ? pxFmtBytes(px.speed.up) + '/s' : '—';
+    if (sdownFoot) sdownFoot.textContent = running ? pxFmtBytes(px.speed.down) + '/s' : '—';
+  }
+
+  function renderProxyPage() {
+    stopRestStatusTimer();
+    el.grid.style.display = 'block';
+    const oldNodesScroll = el.grid.querySelector('.px-nodes');
+    const savedNodesScrollTop = oldNodesScroll ? oldNodesScroll.scrollTop : 0;
+
+    if (!proxyApi) {
+      el.grid.innerHTML = '<div class="proxy-page"><div class="set-group"><div class="set-group-title">代理</div>'
+        + '<div class="set-row"><div class="set-label">浏览器预览模式不支持代理功能</div></div></div></div>';
+      return;
+    }
+
+    const st = px.state;
+    const installed = !!(st && st.coreInstalled);
+    const running = !!(st && st.running);
+    const port = (st && st.port) || 7890;
+    const subs = (st && st.subscriptions) || [];
+    const curTab = ui.proxyTab || 'overview';
+
+    /* 侧边栏导航项（移除设置，新增测试） */
+    const pxCoreNav = [
+      ['overview', '概览', '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><rect x="2" y="6" width="5" height="8" rx="1"/><rect x="9" y="3" width="5" height="11" rx="1"/><path d="M2 14h12"/></svg>'],
+      ['proxies', '代理', '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="8" cy="8" r="6"/><path d="M2.5 8h11M8 2.3c1.8 1.6 2.8 3.7 2.8 5.7S9.8 12.1 8 13.7C6.2 12.1 5.2 10 5.2 8s1-4.1 2.8-5.7z"/></svg>'],
+      ['subs', '订阅', '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2" width="11" height="12" rx="1.5"/><path d="M5 5.5h6M5 8h6M5 10.5h3"/></svg>'],
+      ['test', '测试', '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 1.5"/></svg>'],
+    ];
+    const navNames = { overview: '概览', proxies: '代理', subs: '订阅', test: '测试' };
+    const coreDesc = !installed ? '未安装'
+      : running ? ('运行中 · 端口 ' + port)
+      : ('已安装 · 未运行');
+
+    /* IP 信息卡片 */
+    let ipCard = '';
+    if (!installed) {
+      ipCard = '<div class="px-ip"><div class="px-ip-empty">安装内核后显示出口 IP</div></div>';
+    } else if (!running) {
+      ipCard = '<div class="px-ip"><div class="px-ip-empty">内核未运行</div></div>';
+    } else if (px.ipLoading) {
+      ipCard = '<div class="px-ip"><div class="px-ip-empty">查询中…</div></div>';
+    } else if (px.ipInfo) {
+      const info = px.ipInfo;
+      ipCard = '<div class="px-ip">'
+        + '<button class="px-ip-refresh-icon" id="px-ip-refresh" title="刷新 IP">↻</button>'
+        + '<div class="px-ip-row"><span>IP</span><b>' + pxEsc(info.ip || '—') + '</b></div>'
+        + '<div class="px-ip-row"><span>地区</span><b>' + pxEsc([info.country, info.region, info.city].filter(Boolean).join(' · ') || '—') + '</b></div>'
+        + '<div class="px-ip-row"><span>运营商</span><b>' + pxEsc(info.org || info.isp || '—') + '</b></div>'
+        + '</div>';
+    } else {
+      ipCard = '<div class="px-ip"><div class="px-ip-empty">点击刷新获取出口 IP</div>'
+        + '<button class="btn ghost px-ip-refresh" id="px-ip-refresh">刷新 IP</button></div>';
+    }
+
+    /* 订阅卡片 */
+    const subsHtml = subs.length
+      ? subs.map((sub) => {
+          const cur = st.currentSub === sub.id;
+          const info = sub.info || null;
+          let infoHtml = '';
+          if (info && info.total) {
+            const used = (info.upload || 0) + (info.download || 0);
+            const pctUsed = Math.min(100, Math.round(used / info.total * 100));
+            infoHtml = '<div class="px-sub-usage"><div class="px-sub-bar"><i style="width:' + pctUsed + '%"></i></div>'
+              + '<span>已用 ' + pxFmtBytes(used) + ' / ' + pxFmtBytes(info.total) + '</span></div>';
+          }
+          let updatedText = '—';
+          const d = sub.updatedAt ? new Date(sub.updatedAt) : null;
+          if (d && !isNaN(d)) {
+            updatedText = (d.getMonth() + 1) + '月' + d.getDate() + '日 '
+              + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+          }
+          const expireText = info && info.expire ? ' · ' + new Date(info.expire * 1000).getFullYear() + '年到期' : '';
+          return '<div class="px-sub' + (cur ? ' on' : '') + '" data-id="' + pxEsc(sub.id) + '">'
+            + '<div class="px-sub-main" data-act="use">'
+            +   '<div class="px-sub-name">' + pxEsc(sub.name) + (cur ? '<em class="px-sub-tag">使用中</em>' : '') + '</div>'
+            +   '<div class="px-sub-url">' + pxEsc(sub.url) + '</div>'
+            +   '<div class="px-sub-meta">更新于 ' + updatedText + pxEsc(expireText) + '</div>'
+            +   infoHtml
+            + '</div>'
+            + '<div class="px-sub-actions">'
+            +   '<button class="px-sub-btn" data-act="refresh" title="更新">↻</button>'
+            +   '<button class="px-sub-btn danger" data-act="del" title="删除">×</button>'
+            + '</div>'
+            + '</div>';
+        }).join('')
+      : '<div class="px-empty">还没有订阅</div>';
+
+    /* 当前节点 — 使用 resolvedNow / resolvedNode 解决自动选择延迟同步 */
+    let currentHtml = '';
+    if (!installed) currentHtml = '<div class="px-empty">安装内核并添加订阅后可用</div>';
+    else if (!running) currentHtml = '<div class="px-empty">内核未运行</div>';
+    else if (!px.proxies) currentHtml = '<div class="px-empty">正在读取节点…</div>';
+    else {
+      const g = (px.proxies.groups || [])[0];
+      if (!g) currentHtml = '<div class="px-empty">暂无代理组</div>';
+      else {
+        // 解析实际生效节点
+        const displayName = g.resolvedNow || g.now || '—';
+        const realNode = g.resolvedNode || ((px.proxies.nodes || {})[g.now]) || {};
+        const isAutoResolved = g.resolvedNow && g.resolvedNow !== g.now;
+        // 再测一次当前节点时也用 resolvedNow
+        if (!px._resolvedNow) px._resolvedNow = {};
+        px._resolvedNow[g.name] = g.resolvedNow || g.now;
+        currentHtml = '<div class="px-current">'
+          + '<div class="px-current-info">'
+          +   '<div class="px-current-name" title="' + pxEsc(g.now) + '">' + pxEsc(displayName)
+          +     (isAutoResolved ? '<span class="px-auto-hint">（' + pxEsc(g.now) + '）</span>' : '') + '</div>'
+          +   '<div class="px-current-meta"><span class="px-chip">' + pxEsc(realNode.type || '—') + '</span>'
+          +   '<span class="px-delay ' + pxDelayClass(realNode.delay) + '" id="px-current-delay">' + pxDelayText(realNode.delay) + '</span></div>'
+          + '</div>'
+          + '<button class="btn" id="px-test-current">测速</button>'
+          + '</div>';
+      }
+    }
+
+    /* 节点列表 */
+    let groupsHtml = '';
+    if (running && px.proxies) {
+      const groups = (px.proxies.groups || []).filter((g) => g.all && g.all.length);
+      if (groups.length) {
+        if (!px.activeGroup || !groups.some((g) => g.name === px.activeGroup)) px.activeGroup = groups[0].name;
+        const g = groups.find((x) => x.name === px.activeGroup);
+        const nodes = px.proxies.nodes || {};
+        const tabs = groups.map((x) => '<button class="px-gtab' + (x.name === g.name ? ' on' : '') + '" data-g="' + pxEsc(x.name) + '" title="' + pxEsc(x.type) + '">' + pxEsc(x.name) + '</button>').join('');
+        const sortedNames = g.all.slice().sort((a, b) => {
+          const da = (nodes[a] && nodes[a].delay) || 0;
+          const db = (nodes[b] && nodes[b].delay) || 0;
+          if (!da && !db) return 0; if (!da) return 1; if (!db) return -1; return da - db;
+        });
+        const rows = sortedNames.map((name) => {
+          const n = nodes[name] || {};
+          const cur = g.now === name;
+          return '<div class="px-node' + (cur ? ' on' : '') + '" data-node="' + pxEsc(name) + '">'
+            + '<span class="px-node-name">' + pxEsc(name) + '</span>'
+            + '<span class="px-node-type">' + pxEsc(n.type || '') + '</span>'
+            + '<span class="px-delay ' + pxDelayClass(n.delay) + '" data-delay="' + pxEsc(name) + '">' + pxDelayText(n.delay) + '</span>'
+            + '</div>';
+        }).join('');
+        const dirTesting = px.testingGroup && px.testingMode === 'direct';
+        const pxTesting = px.testingGroup && px.testingMode === 'proxy';
+        groupsHtml = '<div id="px-groups-wrap"><div class="px-gtabs">' + tabs
+          + '<button class="px-gtest" id="px-test-direct"' + (px.testingGroup ? ' disabled' : '') + ' title="直连测速：对节点服务器做 TCP 握手，不经过代理">' + (dirTesting ? '测速中…' : '直连测速') + '</button>'
+          + '<button class="px-gtest" id="px-test-proxy"' + (px.testingGroup ? ' disabled' : '') + ' title="代理测速：通过代理内核实际请求测速 URL">' + (pxTesting ? '测速中…' : '代理测速') + '</button></div>'
+          + '<div class="px-nodes">' + rows + '</div></div>';
+      }
+    }
+
+    /* 模式按钮 */
+    const mode = (st && st.mode) || 'rule';
+    const modeBtn = (m, label, desc) => '<button data-mode="' + m + '" class="' + (mode === m ? 'on' : '') + '" title="' + desc + '">' + label + '</button>';
+    const modeHtml = '<div class="px-modes" id="px-modes">'
+      + modeBtn('rule', '规则', '国内直连，国外走代理')
+      + modeBtn('global', '全局', '全部流量走代理')
+      + modeBtn('direct', '直连', '全部流量直连')
+      + '</div>';
+
+    /* 右侧主内容：根据 curTab 选择 */
+    let mainHtml = '';
+    if (curTab === 'overview') {
+      mainHtml = [
+        /* 内核横幅（未安装时） */
+        !st ? '<div class="set-group"><div class="set-group-title">代理内核</div><div class="set-row"><div class="set-label">正在读取内核状态…</div></div></div>'
+          : !installed ? '<div class="set-group"><div class="set-group-title">代理内核</div>'
+            + '<div class="set-row"><div class="set-label">首次使用需要安装 mihomo 代理内核<span class="set-desc">下载自开源项目 MetaCubeX/mihomo</span></div></div>'
+            + '<div class="set-row btns"><button class="btn" id="px-dl-core"' + (px.downloading ? ' disabled' : '') + '>' + (px.downloading ? '下载中…' : '下载内核') + '</button>'
+            + '<button class="btn ghost" id="px-pick-core">选择本地内核文件</button></div>'
+            + (px.dlMessage ? '<div class="set-row"><div class="set-label px-dl-msg" id="px-dl-msg">' + pxEsc(px.dlMessage) + '</div></div>' : '')
+            + '</div>' : '',
+        /* IP 信息 */
+        '<div class="set-group">',
+        '  <div class="set-group-title">出口 IP</div>',
+        '  ' + ipCard,
+        '</div>',
+        /* 当前节点 */
+        '<div class="set-group">',
+        '  <div class="set-group-title">当前节点</div>',
+        '  <div id="px-current-wrap">' + currentHtml + '</div>',
+        '</div>',
+        /* 内核控制 */
+        '<div class="set-group">',
+        '  <div class="set-group-title">内核控制</div>',
+        '  <div class="set-row"><div class="set-label">代理内核<span class="set-desc">' + pxEsc(coreDesc) + '</span></div>',
+        '    <div class="px-core-actions">',
+        '      <button class="btn" id="px-core-toggle"' + (!installed ? ' disabled' : '') + '>' + (running ? '停止' : '启动') + '</button>',
+        '      <label class="px-auto-start"><input type="checkbox" id="px-sw-autostart"' + (st && st.autoStart ? ' checked' : '') + ' /><span>自动启动</span></label>',
+        '    </div></div>',
+        '</div>',
+        /* 网络设置 */
+        '<div class="set-group">',
+        '  <div class="set-group-title">网络设置</div>',
+        '  <div class="set-row"><div class="set-label">系统代理<span class="set-desc">指向 127.0.0.1:' + port + '</span></div>',
+        '    <button class="switch' + (st && st.sysProxy ? ' on' : '') + '" id="px-sw-sys"></button></div>',
+        '  <div class="set-row"><div class="set-label">虚拟网卡<span class="set-desc">TUN 接管整机流量</span></div>',
+        '    <button class="switch' + (st && st.tunMode ? ' on' : '') + '" id="px-sw-tun"></button></div>',
+        '  <div class="set-row"><div class="set-label">自身代理<span class="set-desc">仅代理本工作台和内置浏览器</span></div>',
+        '    <button class="switch' + (st && st.selfProxy ? ' on' : '') + '" id="px-sw-self"></button>',
+        '    <label class="px-auto-start" style="margin-left:10px;"><input type="checkbox" id="px-sw-auto-self"' + (st && st.autoSelfProxy ? ' checked' : '') + ' /><span>自动开启</span></label></div>',
+        '</div>',
+        /* 代理模式 */
+        '<div class="set-group">',
+        '  <div class="set-group-title">代理模式</div>',
+        '  ' + modeHtml,
+        '</div>',
+        /* 节点筛选（白/黑名单关键字） */
+        '<div class="set-group">',
+        '  <div class="set-group-title">节点筛选'
+        + '<button class="btn ghost" id="px-kw-save" style="float:right;font-size:11.5px;padding:3px 10px;">应用筛选</button>'
+        + '</div>',
+        '  <div class="set-row"><div class="set-label">黑名单关键字<span class="set-desc">命中任一即过滤，优先级最高（逗号/空格/换行分隔）</span></div></div>',
+        '  <textarea id="px-kw-exclude" class="px-kw-input" rows="2" placeholder="例：免费、试用、expired">'
+        + pxEsc(kwText(st && st.nodeExcludeKeywords)) + '</textarea>',
+        '  <div class="set-row" style="margin-top:8px;"><div class="set-label">白名单关键字<span class="set-desc">留空=不过滤；非空时必须命中至少一个（逗号/空格/换行分隔）</span></div></div>',
+        '  <textarea id="px-kw-include" class="px-kw-input" rows="2" placeholder="例：日本、美国、HK">'
+        + pxEsc(kwText(st && st.nodeIncludeKeywords)) + '</textarea>',
+        '  <div class="px-kw-hint" id="px-kw-hint" style="display:none;"></div>',
+        '</div>',
+        /* 流量统计 */
+        running ? '<div class="set-group"><div class="set-group-title">流量统计</div>'
+          + '<div class="px-traffic">'
+          + '<div class="px-t-item"><span>总上传</span><b id="px-t-up">—</b><em id="px-s-up"></em></div>'
+          + '<div class="px-t-item"><span>总下载</span><b id="px-t-down">—</b><em id="px-s-down"></em></div>'
+          + '<div class="px-t-item"><span>连接数</span><b id="px-t-count">—</b><em></em></div>'
+          + '</div></div>' : '',
+      ].filter(Boolean).join('');
+    } else if (curTab === 'proxies') {
+      mainHtml = '<div class="set-group"><div class="set-group-title">当前节点</div>' + currentHtml + '</div>'
+        + '<div class="set-group"><div class="set-group-title">节点列表</div>' + groupsHtml + '</div>';
+    } else if (curTab === 'subs') {
+      mainHtml = '<div class="set-group"><div class="set-group-title">订阅列表</div><div class="px-subs" id="px-subs">' + subsHtml + '</div>'
+        + '<div class="px-sub-add"><input id="px-sub-url" type="text" placeholder="粘贴 Clash 订阅链接" spellcheck="false" autocomplete="off" />'
+        + '<div class="px-sub-add-row"><input id="px-sub-name" type="text" placeholder="名称（可选）" spellcheck="false" autocomplete="off" /><button class="btn" id="px-sub-add">添加订阅</button></div></div></div>';
+    } else if (curTab === 'test') {
+      // 网站测速页
+      const sites = [
+        { name: 'Apple', url: 'https://www.apple.com', icon: '🍎' },
+        { name: 'GitHub', url: 'https://github.com', icon: '🐙' },
+        { name: 'Google', url: 'https://www.google.com', icon: '🔍' },
+        { name: 'YouTube', url: 'https://www.youtube.com', icon: '▶️' },
+        { name: 'Twitter/X', url: 'https://x.com', icon: '𝕏' },
+        { name: 'Wikipedia', url: 'https://www.wikipedia.org', icon: '📖' },
+        { name: 'Cloudflare', url: 'https://www.cloudflare.com', icon: '☁️' },
+        { name: 'Netflix', url: 'https://www.netflix.com', icon: '🎬' },
+        { name: 'Reddit', url: 'https://www.reddit.com', icon: '👽' },
+        { name: 'Bilibili', url: 'https://www.bilibili.com', icon: '📺' },
+        { name: 'Baidu', url: 'https://www.baidu.com', icon: '🐾' },
+        { name: 'JD.com', url: 'https://www.jd.com', icon: '🛒' },
+      ];
+      const sHtml = sites.map((s) => {
+        const cachedDelay = px.testResults[s.url] || 0;
+        return '<div class="px-stest" data-url="' + pxEsc(s.url) + '">'
+          + '<span class="px-stest-ico">' + s.icon + '</span>'
+          + '<span class="px-stest-name">' + pxEsc(s.name) + '</span>'
+          + '<span class="px-stest-delay px-delay ' + pxDelayClass(cachedDelay) + '" data-test="' + pxEsc(s.url) + '">' + pxDelayText(cachedDelay) + '</span>'
+          + '</div>';
+      }).join('');
+      mainHtml = '<div class="set-group"><div class="set-group-title">网站延迟测试 '
+        + '<button class="btn ghost" id="px-test-all" style="float:right;font-size:12px;padding:4px 10px;">全部测试</button></div>'
+        + '<div class="px-stests">' + sHtml + '</div></div>'
+        + '<div class="set-group"><div class="set-group-title">自定义测试</div>'
+        + '<div class="px-stest-custom"><input id="px-test-url" type="text" placeholder="https://example.com" spellcheck="false" autocomplete="off" />'
+        + '<button class="btn" id="px-test-go">测试</button></div></div>';
+    } else {
+      mainHtml = '';
+    }
+
+    /* 组装完整两栏布局 */
+    el.grid.innerHTML = '<div class="proxy-page">'
+      + '<aside class="proxy-nav">'
+      + '  <button class="settings-back" id="px-back">← 返回应用</button>'
+      + '  <div class="proxy-status-row"><span class="proxy-status-dot' + (running ? ' on' : '') + '"></span>'
+      + '<span class="proxy-status-text">' + (running ? '运行中' : (installed ? '已安装' : '未安装')) + '</span></div>'
+      + '  <nav class="set-tabs proxy-tabs" id="px-tabs">'
+      + pxCoreNav.map(([key, name, ico]) => '<button data-tab="' + key + '"' + (curTab === key ? ' class="on"' : '') + '>' + ico + '<span>' + name + '</span></button>').join('')
+      + '  </nav>'
+      + '  <div class="proxy-nav-foot">'
+      + '    <div class="proxy-foot-row"><span>↑</span><b id="px-s-up-foot">—</b></div>'
+      + '    <div class="proxy-foot-row"><span>↓</span><b id="px-s-down-foot">—</b></div>'
+      + '    <div class="proxy-foot-row"><span>⚙</span><b>' + pxEsc(coreDesc.split(' · ')[0]) + '</b></div>'
+      + '  </div>'
+      + '</aside>'
+      + '<section class="proxy-main"><div class="settings-title">' + navNames[curTab] + '</div>' + mainHtml + '</section>'
+      + '</div>';
+
+    const q = (sel) => el.grid.querySelector(sel);
+    paintProxyTraffic();
+    if (savedNodesScrollTop > 0) { const n = el.grid.querySelector('.px-nodes'); if (n) n.scrollTop = savedNodesScrollTop; }
+
+    /* 侧栏切换 */
+    q('#px-tabs').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-tab]');
+      if (!b || b.dataset.tab === ui.proxyTab) return;
+      ui.proxyTab = b.dataset.tab;
+      // 切到测试 tab 时自动开始拉 IP（概览页也要）
+      if (running) {
+        fetchProxyIp();
+      }
+      render();
+    });
+    q('#px-back').addEventListener('click', () => { ui.proxyOpen = false; stopProxyPoll(); render(); });
+
+    /* 内核控制事件（概览页） */
+    const dlBtn = q('#px-dl-core');
+    if (dlBtn) dlBtn.addEventListener('click', async () => {
+      if (px.downloading) return;
+      px.downloading = true; px.dlMessage = '准备下载…'; render();
+      const r = await proxyApi.downloadCore();
+      px.downloading = false;
+      if (r && r.ok) { px.dlMessage = ''; toast('内核安装完成', 'ok'); }
+      else { px.dlMessage = (r && r.error) || '下载失败'; toast(px.dlMessage, 'err'); }
+      await refreshProxyState(true);
+    });
+    const pickBtn = q('#px-pick-core');
+    if (pickBtn) pickBtn.addEventListener('click', async () => {
+      const r = await proxyApi.pickCore();
+      if (r && r.ok) { toast('内核已就绪', 'ok'); await refreshProxyState(true); }
+      else if (r && !r.canceled) toast((r && r.error) || '选择失败', 'err');
+    });
+    const coreBtn = q('#px-core-toggle');
+    if (coreBtn) coreBtn.addEventListener('click', async () => {
+      coreBtn.disabled = true; coreBtn.textContent = running ? '停止中…' : '启动中…';
+      const r = running ? await proxyApi.stop() : await proxyApi.start();
+      if (!r || !r.ok) { toast((r && r.error) || '操作失败', 'err'); px.lastRunning = false; }
+      await refreshProxyState(true);
+      if (!running && r && r.ok) { fetchProxyIp(); }
+    });
+    const autoSw = q('#px-sw-autostart');
+    if (autoSw) autoSw.addEventListener('change', async () => {
+      const r = await proxyApi.setAutoStart(autoSw.checked);
+      if (!r || !r.ok) { autoSw.checked = !autoSw.checked; toast((r && r.error) || '设置失败', 'err'); }
+      else if (r.state) px.state = r.state;
+    });
+    const bindSwitch = (id, fn) => {
+      const sw = q('#' + id); if (!sw) return;
+      sw.addEventListener('click', async () => {
+        const on = !sw.classList.contains('on'); sw.classList.toggle('on', on);
+        const r = await fn(on);
+        if (!r || !r.ok) { sw.classList.toggle('on', !on); toast((r && r.error) || '设置失败', 'err'); }
+        else if (r.state) px.state = r.state;
+      });
+    };
+    bindSwitch('px-sw-sys', (on) => proxyApi.setSysProxy(on));
+    // TUN：非管理员时 setTun 返回 NEED_ADMIN，改为弹确认框一键以管理员重启并自动开启
+    const tunSw = q('#px-sw-tun');
+    if (tunSw) tunSw.addEventListener('click', async () => {
+      const on = !tunSw.classList.contains('on');
+      tunSw.classList.toggle('on', on);
+      const r = await proxyApi.setTun(on);
+      if (r && r.ok) { if (r.state) px.state = r.state; return; }
+      tunSw.classList.toggle('on', !on);
+      if (on && r && r.code === 'NEED_ADMIN') {
+        confirmDialog('虚拟网卡需要管理员权限',
+          '将以管理员身份重启工作台（Windows 会弹 UAC 确认框），重启后自动开启 TUN。开启后整机流量（含 Telegram 等任意软件）都会按规则走代理。',
+          '以管理员重启', async () => {
+            const rr = await proxyApi.relaunchAdminForTun();
+            if (!rr || !rr.ok) toast((rr && rr.error) || '重启失败', 'err');
+          });
+      } else {
+        toast((r && r.error) || '设置失败', 'err');
+      }
+    });
+    bindSwitch('px-sw-self', (on) => proxyApi.setSelfProxy(on));
+    const autoSelfCb = q('#px-sw-auto-self');
+    if (autoSelfCb) autoSelfCb.addEventListener('change', async () => {
+      const r = await proxyApi.setAutoSelfProxy(autoSelfCb.checked);
+      if (r && r.ok && r.state) px.state = r.state;
+      else autoSelfCb.checked = !autoSelfCb.checked;
+    });
+    const modesEl = q('#px-modes');
+    if (modesEl) modesEl.addEventListener('click', async (e) => {
+      const b = e.target.closest('button[data-mode]');
+      if (!b || (px.state && b.dataset.mode === px.state.mode)) return;
+      const r = await proxyApi.setMode(b.dataset.mode);
+      if (r && r.ok) { if (px.state) px.state.mode = b.dataset.mode; render(); }
+      else toast((r && r.error) || '模式切换失败', 'err');
+    });
+
+    /* 节点筛选（关键字）保存 */
+    const kwSaveBtn = q('#px-kw-save');
+    if (kwSaveBtn) kwSaveBtn.addEventListener('click', async () => {
+      const exTa = q('#px-kw-exclude');
+      const inTa = q('#px-kw-include');
+      const exclude = kwSplit(exTa ? exTa.value : '');
+      const include = kwSplit(inTa ? inTa.value : '');
+      const r = await proxyApi.setNodeKeywords({ include, exclude });
+      if (!(r && r.ok)) { toast((r && r.error) || '保存失败', 'err'); return; }
+
+      // 以主进程保存后的结果为准（避免本地猜测）
+      const saved = (r.state && Array.isArray(r.state.nodeExcludeKeywords)) ? r.state.nodeExcludeKeywords : exclude;
+      const savedIn = (r.state && Array.isArray(r.state.nodeIncludeKeywords)) ? r.state.nodeIncludeKeywords : include;
+      if (r.state) px.state = r.state;
+
+      // 直接回写输入框，不依赖整页重渲染
+      if (exTa) exTa.value = kwText(saved);
+      if (inTa) inTa.value = kwText(savedIn);
+
+      toast('筛选已应用' + (running ? '（内核已重启）' : ''), 'ok');
+
+      await refreshProxyState(true);
+
+      // refresh 会重建 DOM，重新取节点并把提示写回新的 hint 元素
+      const hint = q('#px-kw-hint');
+      if (hint) {
+        const total = (px.proxies && px.proxies.nodes) ? Object.keys(px.proxies.nodes).length : '?';
+        hint.textContent = '已保存：黑名单 ' + kwText(saved) + '（' + saved.length + ' 条） · 白名单 '
+          + (kwText(savedIn) || '不限') + ' · 当前节点 ' + total + ' 个';
+        hint.style.display = 'block';
+      }
+    });
+
+    /* 订阅事件 */
+    const subsEl = q('#px-subs');
+    if (subsEl) subsEl.addEventListener('click', async (e) => {
+      const card = e.target.closest('.px-sub'); if (!card) return;
+      const id = card.dataset.id; const btn = e.target.closest('[data-act]');
+      const act = btn ? btn.dataset.act : 'use';
+      if (act === 'del') { confirmDialog('删除订阅', '确定删除这个订阅吗？', '删除', async () => {
+        const r = await proxyApi.deleteSub(id);
+        if (r && r.ok) { toast('已删除', 'ok'); await refreshProxyState(true); }
+        else toast((r && r.error) || '失败', 'err'); }); return; }
+      if (act === 'refresh') { const r = await proxyApi.refreshSub(id); if (r && r.ok) { toast('已更新', 'ok'); await refreshProxyState(true); } return; }
+      const r = await proxyApi.useSub(id);
+      if (r && r.ok) { await refreshProxyState(true); fetchProxyIp(); }
+    });
+    const addBtn = q('#px-sub-add');
+    if (addBtn) addBtn.addEventListener('click', async () => {
+      const url = trim(q('#px-sub-url').value); const name = trim(q('#px-sub-name').value);
+      if (!url) { toast('请输入订阅链接', 'err'); return; }
+      addBtn.disabled = true; addBtn.textContent = '添加中…';
+      const r = await proxyApi.addSub({ url, name });
+      if (r && r.ok) { toast('已添加', 'ok'); await refreshProxyState(true); }
+      else toast((r && r.error) || '失败', 'err');
+      addBtn.disabled = false; addBtn.textContent = '添加订阅';
+    });
+
+    /* 当前节点测速 — 用 resolvedNow */
+    const testCur = q('#px-test-current');
+    if (testCur) testCur.addEventListener('click', async () => {
+      const g = px.proxies && px.proxies.groups && px.proxies.groups[0];
+      if (!g) return;
+      const testName = g.resolvedNow || g.now;
+      testCur.disabled = true; testCur.textContent = '测速中…';
+      const r = await proxyApi.testDelay(testName);
+      testCur.disabled = false; testCur.textContent = '测速';
+      if (r && r.ok) {
+        if (px.proxies && px.proxies.nodes && px.proxies.nodes[testName]) px.proxies.nodes[testName].delay = r.delay;
+        const dEl = $('px-current-delay');
+        if (dEl) { dEl.textContent = pxDelayText(r.delay); dEl.className = 'px-delay ' + pxDelayClass(r.delay); }
+        // 同步 resolvedNode 的 delay
+        if (g.resolvedNode) g.resolvedNode.delay = r.delay;
+      } else toast((r && r.error) || '测速失败', 'err');
+    });
+
+    /* 节点列表事件 */
+    const groupsWrap = q('#px-groups-wrap');
+    if (groupsWrap) groupsWrap.addEventListener('click', async (e) => {
+      if (e.target.closest('.px-gtest')) return;
+      const tab = e.target.closest('.px-gtab');
+      if (tab && tab.dataset.g !== px.activeGroup) { px.activeGroup = tab.dataset.g; render(); return; }
+      const row = e.target.closest('.px-node');
+      if (row && row.dataset.node) {
+        const g = (px.proxies.groups || []).find((x) => x.name === px.activeGroup);
+        if (!g || g.now === row.dataset.node) return;
+        const r = await proxyApi.select(g.name, row.dataset.node);
+        if (r && r.ok) { await refreshProxyState(true); fetchProxyIp(); }
+        else toast((r && r.error) || '切换失败', 'err');
+      }
+    });
+    const bindGroupTest = (sel, mode) => {
+      const btn = q(sel);
+      if (!btn) return;
+      btn.addEventListener('click', async () => {
+        if (px.testingGroup) return;
+        const r = await testActiveGroupAndSort(mode);
+        if (!r || !r.ok) { toast((r && r.error) || '测速失败', 'err'); return; }
+        if (r.hit) toast('测速完成：' + r.hit + ' 个节点有结果', 'ok');
+        else toast('测速完成：所有节点均超时', 'err');
+      });
+    };
+    bindGroupTest('#px-test-direct', 'direct');
+    bindGroupTest('#px-test-proxy', 'proxy');
+
+    /* 刷新 IP */
+    const ipRefresh = q('#px-ip-refresh');
+    if (ipRefresh) ipRefresh.addEventListener('click', fetchProxyIp);
+
+    /* 网站测速事件 */
+    const stests = el.grid.querySelectorAll('.px-stest');
+    stests.forEach((el) => {
+      el.addEventListener('click', async () => {
+        const url = el.dataset.url;
+        const dEl = el.querySelector('[data-test]');
+        if (!dEl) return;
+        dEl.textContent = '测试中…'; dEl.className = 'px-delay';
+        const r = await proxyApi.testDelayUrl(url);
+        if (r && r.ok) {
+          dEl.textContent = pxDelayText(r.delay);
+          dEl.className = 'px-delay ' + pxDelayClass(r.delay);
+          px.testResults[url] = r.delay;  // 缓存结果
+        } else {
+          dEl.textContent = pxDelayText(0); dEl.className = 'px-delay';
+          delete px.testResults[url];
+        }
+      });
+    });
+    const testAll = q('#px-test-all');
+    if (testAll) testAll.addEventListener('click', async () => {
+      testAll.disabled = true; testAll.textContent = '批量测试中…';
+      for (const item of stests) {
+        item.click();
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      testAll.disabled = false; testAll.textContent = '全部测试';
+    });
+    const testGo = q('#px-test-go');
+    if (testGo) testGo.addEventListener('click', async () => {
+      const u = trim(q('#px-test-url').value);
+      if (!u) return;
+      testGo.disabled = true; testGo.textContent = '测试中…';
+      const r = await proxyApi.testDelayUrl(u);
+      testGo.disabled = false; testGo.textContent = '测试';
+      if (r && r.ok) px.testResults[u] = r.delay;
+      toast(r && r.ok ? ('延迟 ' + r.delay + 'ms') : ((r && r.error) || '测试失败'), r && r.ok ? 'ok' : 'err');
+    });
+
+    /* 首次进入代理页且内核运行时，拉取出口 IP */
+    if (running && !px.ipInfo && !px.ipLoading) fetchProxyIp();
+  }
+
+  /* ------------------------------ 标签页管理 ------------------------------ */
+
+  // 新建标签页：url 为空则 about:blank；activate 默认 true
+  function newTab(url, activate) {
+    const id = ++tabIdSeq;
+    browserTabs.push({ id, title: '新标签页', url: url || '', loading: false });
+    const wv = document.createElement('webview');
+    wv.id = 'br-wv-' + id;
+    wv.setAttribute('allowpopups', '');
+    // 独立持久化 session（保留 cookie/密码）；自身代理由主进程对该 partition 单独 setProxy
+    wv.setAttribute('partition', 'persist:workbench');
+    wv.src = url || 'about:blank';
+    wv.style.display = 'none';
+    const views = $('br-views');
+    if (views) views.appendChild(wv);
+    bindWebviewEvents(wv, id);
+    if (activate !== false || browserTabs.length === 1) switchTab(id);
+    else renderTabs();
+    return id;
+  }
+
+  function switchTab(id) {
+    activeTabId = id;
+    browserTabs.forEach((t) => {
+      const wv = $('br-wv-' + t.id);
+      if (wv) wv.style.display = (t.id === id) ? '' : 'none';
+    });
+    const t = activeTab();
+    if (t && el.brAddr) el.brAddr.value = t.url || '';
+    updateBrowserNav();
+    updateFavStar();
+    renderTabs();
+  }
+
+  function closeTab(id) {
+    const idx = browserTabs.findIndex((t) => t.id === id);
+    if (idx < 0) return;
+    const wv = $('br-wv-' + id);
+    if (wv) wv.remove();
+    browserTabs.splice(idx, 1);
+    if (activeTabId === id) {
+      if (browserTabs.length === 0) {
+        activeTabId = null;
+        newTab(getNewTabUrl(), true);
+      } else {
+        const next = browserTabs[Math.min(idx, browserTabs.length - 1)];
+        switchTab(next.id);
+      }
+    } else {
+      renderTabs();
+    }
+  }
+
+  // 渲染标签页栏
+  function renderTabs() {
+    const bar = $('br-tabs');
+    if (!bar) return;
+    const tabsHtml = browserTabs.map((t) => {
+      const on = t.id === activeTabId ? ' on' : '';
+      const title = String(t.title || '新标签页').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const spin = t.loading ? '<span class="br-tab-spin" title="加载中"></span>' : '';
+      return '<div class="br-tab' + on + '" data-id="' + t.id + '">' +
+               spin +
+               '<span class="br-tab-title">' + title + '</span>' +
+               '<button class="br-tab-close" data-close="' + t.id + '" title="关闭标签页">×</button>' +
+             '</div>';
+    }).join('');
+    bar.innerHTML = tabsHtml + '<button class="br-tab-add" id="br-tab-add" title="新建标签页">+</button>';
+    bar.querySelectorAll('.br-tab').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        if (e.target.classList.contains('br-tab-close')) return;
+        switchTab(Number(el.dataset.id));
+      });
+    });
+    bar.querySelectorAll('[data-close]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeTab(Number(btn.dataset.close));
+      });
+    });
+    const addBtn = $('br-tab-add');
+    if (addBtn) addBtn.addEventListener('click', () => newTab(getNewTabUrl(), true));
+  }
+
+  // 每个 webview 独立绑定导航事件，更新对应标签的 url/title 与（激活时）地址栏
+  function bindWebviewEvents(wv, tabId) {
+    wv.addEventListener('did-navigate', (e) => {
+      const tab = browserTabs.find((t) => t.id === tabId);
+      if (!tab) return;
+      tab.url = e.url;
+      if (e.url && e.url !== 'about:blank') lastBrowserUrl = e.url;
+      if (tabId === activeTabId) {
+        if (el.brAddr) el.brAddr.value = e.url;
+        updateBrowserNav();
+        updateFavStar();
+      }
+    });
+    wv.addEventListener('did-navigate-in-page', (e) => {
+      const tab = browserTabs.find((t) => t.id === tabId);
+      if (tab) tab.url = e.url;
+      if (tabId === activeTabId) {
+        if (el.brAddr) el.brAddr.value = e.url;
+        updateFavStar();
+      }
+    });
+    wv.addEventListener('page-title-updated', (e) => {
+      const tab = browserTabs.find((t) => t.id === tabId);
+      if (tab && e.title) { tab.title = e.title; renderTabs(); }
+    });
+    wv.addEventListener('did-start-loading', () => {
+      const tab = browserTabs.find((t) => t.id === tabId);
+      if (tab) tab.loading = true;
+      if (tabId === activeTabId) updateBrowserNav();
+      renderTabs();
+    });
+    wv.addEventListener('did-stop-loading', () => {
+      const tab = browserTabs.find((t) => t.id === tabId);
+      if (tab) tab.loading = false;
+      if (tabId === activeTabId) updateBrowserNav();
+      renderTabs();
+    });
+    wv.addEventListener('did-finish-load', () => { if (tabId === activeTabId) updateBrowserNav(); });
+    wv.addEventListener('did-fail-load', () => { if (tabId === activeTabId) updateBrowserNav(); });
+    // 拦截 window.open / target=_blank 的链接，改为在当前浏览器内新开标签页
+    wv.addEventListener('new-window', (e) => {
+      e.preventDefault && e.preventDefault();
+      const url = e.url;
+      if (!url || url === 'about:blank') return;
+      newTab(url, true);
+    });
+  }
+
+  /* ------------------------------ 加载进度条 ------------------------------ */
+
+  /* ------------------------------ 导航与工具栏 ------------------------------ */
+
+  // 把用户输入变成可访问的 URL；没有协议前缀时默认补 https://，
+  // 看起来像域名才当网址，否则当搜索词走 Bing
+  function resolveUrl(input) {
+    const v = trim(input);
+    if (!v) return '';
+    if (/^(https?:|file:|chrome:|about:|edge:)/i.test(v)) return v;
+    // 像 IP / 域名（含点或 localhost，且没有空格）
+    if (/^[^\s]+\.[^\s]+$/.test(v) || /^localhost(\b|[:/])/i.test(v)) return 'https://' + v;
+    return 'https://cn.bing.com/search?q=' + encodeURIComponent(v);
+  }
+
+  function loadBrowserUrl(input) {
+    const url = resolveUrl(input);
+    if (!url) return;
+    const wv = activeWebview();
+    if (wv) {
+      try { wv.loadURL(url); } catch (_) { wv.src = url; }
+    }
+    if (el.brAddr) el.brAddr.value = url;
+  }
+
+  function updateBrowserNav() {
+    const wv = activeWebview();
+    if (!wv) return;
+    try {
+      if (el.brBack) el.brBack.disabled = !wv.canGoBack();
+      if (el.brForward) el.brForward.disabled = !wv.canGoForward();
+    } catch (_) {}
+    // 刷新按钮：加载中显示叉号（停止），否则显示刷新图标
+    const tab = activeTab();
+    const reloadBtn = $('br-reload');
+    if (reloadBtn) {
+      if (tab && tab.loading) {
+        reloadBtn.classList.add('loading');
+        reloadBtn.title = '停止加载';
+      } else {
+        reloadBtn.classList.remove('loading');
+        reloadBtn.title = '刷新';
+      }
+    }
+  }
+
+  /* ------------------------------ 收藏夹 ------------------------------ */
+
+  // 展开的文件夹 id 集合（运行时，不持久化）
+  const expandedFolders = new Set(['fav-bar', 'fav-other']);
+
+  function getBookmarks() {
+    const b = browserConfig();
+    const tree = Array.isArray(b.bookmarks) ? b.bookmarks : [];
+    // 兜底：确保系统根文件夹存在
+    let changed = false;
+    if (!tree.some((n) => n.id === 'fav-bar')) { tree.push({ id: 'fav-bar', type: 'folder', title: '收藏夹栏', children: [] }); changed = true; }
+    if (!tree.some((n) => n.id === 'fav-other')) { tree.push({ id: 'fav-other', type: 'folder', title: '其他书签', children: [] }); changed = true; }
+    if (changed) { state.settings.browser.bookmarks = tree; scheduleSave(); }
+    return tree;
+  }
+  function setBookmarks(tree) {
+    state.settings.browser.bookmarks = tree;
+    scheduleSave();
+    renderBookmarkBar();
+    updateFavStar();
+    // 若收藏夹管理页打开，同步刷新
+    const page = $('bm-page');
+    if (page && !page.classList.contains('hidden')) renderBmPage();
+  }
+  function newId() { return Date.now() + '_' + Math.random().toString(36).slice(2, 8); }
+
+  // 在树中按 id 查找节点；parent 返回该节点所在的数组（供 splice 增删）
+  function findNode(id, nodes) {
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      if (n.id === id) return { node: n, parent: nodes, index: i };
+      if (n.type === 'folder' && n.children) {
+        const r = findNode(id, n.children);
+        if (r) return r;
+      }
+    }
+    return null;
+  }
+
+  // 把树拍平成 url 列表（用于去重判断）
+  function flattenUrls(nodes, out) {
+    out = out || [];
+    for (const n of nodes) {
+      if (n.type === 'url') out.push(n.url);
+      else if (n.children) flattenUrls(n.children, out);
+    }
+    return out;
+  }
+
+  // 按 URL 查找节点；parent 返回该节点所在的数组（供 splice 增删）
+  function findUrlNode(url, nodes) {
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      if (n.type === 'url' && n.url === url) return { node: n, parent: nodes, index: i };
+      if (n.type === 'folder' && n.children) {
+        const r = findUrlNode(url, n.children);
+        if (r) return r;
+      }
+    }
+    return null;
+  }
+
+  // 域名，用于 favicon
+  function faviconUrl(url) {
+    try {
+      const u = new URL(url);
+      return 'https://icons.duckduckgo.com/ip3/' + u.hostname + '.ico';
+    } catch (_) { return ''; }
+  }
+
+  // 更新工具栏收藏按钮的实心/空心状态（根据当前页 URL 是否已收藏）
+  function updateFavStar() {
+    const btn = $('br-fav-add');
+    if (!btn) return;
+    const tab = activeTab();
+    const wv = activeWebview();
+    const url = (tab && tab.url) || (wv && wv.src) || '';
+    if (!url || url === 'about:blank') { btn.classList.remove('on'); return; }
+    const tree = getBookmarks();
+    btn.classList.toggle('on', flattenUrls(tree).includes(url));
+  }
+
+  // 当前激活页加入收藏夹 / 取消收藏（切换）
+  function addCurrentBookmark() {
+    const tab = activeTab();
+    const wv = activeWebview();
+    if (!tab) return;
+    const url = (tab.url || (wv && wv.src) || '').trim();
+    if (!url || url === 'about:blank') { toast('当前页面无法收藏', 'err'); return; }
+    const tree = getBookmarks();
+    // 检查是否已收藏
+    const r = findUrlNode(url, tree);
+    if (r) {
+      // 已收藏 → 取消收藏
+      confirmDialog('取消收藏', '确定从收藏夹中移除「' + (r.node.title || url) + '」？', '移除', () => {
+        const tree2 = getBookmarks();
+        const r2 = findUrlNode(url, tree2);
+        if (r2) {
+          r2.parent.splice(r2.index, 1);
+          setBookmarks(tree2);
+          renderFavPanel();
+          updateFavStar();
+          toast('已取消收藏', 'ok');
+        }
+      });
+      return;
+    }
+    // 未收藏 → 添加到「收藏夹栏」
+    const bar = tree.find((n) => n.id === 'fav-bar') || tree[0];
+    bar.children = bar.children || [];
+    bar.children.push({ id: newId(), type: 'url', title: tab.title || url, url, addedAt: Date.now() });
+    setBookmarks(tree);
+    expandedFolders.add(bar.id);
+    renderFavPanel();
+    updateFavStar();
+    toast('已加入收藏夹', 'ok');
+  }
+
+  // 把所有打开的标签页加入收藏夹
+  function addAllOpenTabs() {
+    const tree = getBookmarks();
+    const existing = new Set(flattenUrls(tree));
+    const bar = tree.find((n) => n.id === 'fav-bar') || tree[0];
+    bar.children = bar.children || [];
+    let added = 0;
+    for (const t of browserTabs) {
+      const url = (t.url || '').trim();
+      if (!url || url === 'about:blank' || existing.has(url)) continue;
+      bar.children.push({ id: newId(), type: 'url', title: t.title || url, url, addedAt: Date.now() });
+      existing.add(url);
+      added++;
+    }
+    if (added > 0) {
+      setBookmarks(tree);
+      expandedFolders.add(bar.id);
+      renderFavPanel();
+    }
+    toast(added > 0 ? '已收藏 ' + added + ' 个打开的页面' : '没有可收藏的新页面', added > 0 ? 'ok' : 'err');
+  }
+
+  // 新建文件夹（放进「收藏夹栏」根）
+  function addFolder() {
+    inputDialog('新建文件夹', '请输入文件夹名称', '新建文件夹', (name) => {
+      const tree = getBookmarks();
+      const bar = tree.find((n) => n.id === 'fav-bar') || tree[0];
+      bar.children = bar.children || [];
+      bar.children.push({ id: newId(), type: 'folder', title: name, children: [] });
+      setBookmarks(tree);
+      expandedFolders.add(bar.id);
+      renderFavPanel();
+      toast('已新建文件夹', 'ok');
+    });
+  }
+
+  // 删除节点（文件夹会连同子内容一起删）
+  function removeBookmark(id) {
+    // 保护系统根文件夹不被删除
+    if (id === 'fav-bar' || id === 'fav-other') {
+      toast('默认收藏夹文件夹无法删除', 'err');
+      return;
+    }
+    const r = findNode(id, getBookmarks(), null);
+    if (!r) return;
+    const isFolder = r.node.type === 'folder';
+    const count = isFolder ? flattenUrls(r.node.children || []).length : 1;
+    const msg = isFolder
+      ? '确定删除文件夹「' + (r.node.title || '') + '」及其下的 ' + count + ' 个书签？'
+      : '确定删除书签「' + (r.node.title || r.node.url || '') + '」？';
+    confirmDialog('删除确认', msg, '删除', () => {
+      const tree = getBookmarks();
+      const r2 = findNode(id, tree, null);
+      if (r2) {
+        r2.parent.splice(r2.index, 1);
+        setBookmarks(tree);
+        renderFavPanel();
+        updateFavStar();
+        toast('已删除', 'ok');
+      }
+    });
+  }
+
+  // 展开 / 折叠文件夹
+  function toggleFolder(id) {
+    if (expandedFolders.has(id)) expandedFolders.delete(id);
+    else expandedFolders.add(id);
+    renderFavPanel();
+  }
+
+  function toggleFavPanel() {
+    const panel = $('br-fav-panel');
+    if (!panel) return;
+    const willShow = panel.classList.contains('hidden');
+    panel.classList.toggle('hidden', !willShow);
+    if (willShow) renderFavPanel();
+    else hideFavMenu();
+  }
+
+  // 渲染工具栏下方的收藏夹栏（书签栏）
+  function renderBookmarkBar() {
+    const bar = $('br-bookmark-bar');
+    if (!bar) return;
+    const cfg = browserConfig();
+    // 显隐由设置控制
+    bar.classList.toggle('hidden', !cfg.showFavBar);
+    if (!cfg.showFavBar) return;
+    const tree = getBookmarks();
+    const favBar = tree.find((n) => n.id === 'fav-bar');
+    const items = (favBar && favBar.children) || [];
+    if (items.length === 0) {
+      bar.innerHTML = '<span style="color:var(--dim-2);font-size:11px;padding:0 4px">收藏夹栏为空，点击 ⭐ 添加</span>';
+      return;
+    }
+    bar.innerHTML = items.map((n) => {
+      if (n.type === 'folder') {
+        const title = String(n.title || '文件夹').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return '<span class="br-bookmark-item br-bookmark-folder" data-folder="' + n.id + '" title="' + title + '">' +
+                 '<svg viewBox="0 0 16 16" width="15" height="15"><path d="M1.5 4.5a1 1 0 0 1 1-1h3l1.5 1.5h6a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-9.5a1 1 0 0 1-1-1v-6.5z" fill="currentColor" opacity="0.85"/></svg>' +
+                 '<span class="br-bm-title">' + title + '</span>' +
+               '</span>';
+      }
+      const title = String(n.title || n.url).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const url = String(n.url || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+      const fav = faviconUrl(n.url);
+      return '<span class="br-bookmark-item" data-url="' + url + '" title="' + title + '">' +
+               (fav ? '<img src="' + fav + '" alt="" onerror="this.style.display=\'none\'" />' : '') +
+               '<span class="br-bm-title">' + title + '</span>' +
+             '</span>';
+    }).join('');
+    // 绑定事件
+    bar.querySelectorAll('[data-url]').forEach((el) => {
+      el.addEventListener('click', () => openBrowser(el.dataset.url));
+    });
+    bar.querySelectorAll('[data-folder]').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showBookmarkFolderMenu(el, el.dataset.folder);
+      });
+    });
+  }
+
+  // 书签栏文件夹的下拉菜单
+  function showBookmarkFolderMenu(anchor, folderId) {
+    // 先移除已有菜单
+    const old = $('br-bm-folder-menu');
+    if (old) old.remove();
+    const r = findNode(folderId, getBookmarks(), null);
+    if (!r || r.node.type !== 'folder') return;
+    const children = r.node.children || [];
+    const menu = document.createElement('div');
+    menu.id = 'br-bm-folder-menu';
+    menu.className = 'br-fav-menu';
+    menu.style.position = 'fixed';
+    const rect = anchor.getBoundingClientRect();
+    menu.style.left = rect.left + 'px';
+    menu.style.top = (rect.bottom + 4) + 'px';
+    menu.style.minWidth = '180px';
+    menu.style.maxHeight = '60vh';
+    menu.style.overflowY = 'auto';
+    if (children.length === 0) {
+      menu.innerHTML = '<div class="br-fav-empty" style="padding:12px">文件夹为空</div>';
+    } else {
+      menu.innerHTML = children.map((n) => {
+        if (n.type === 'folder') {
+          const t = String(n.title || '文件夹').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+          return '<div class="br-fav-menu-item" data-subfolder="' + n.id + '"><span style="color:var(--accent)">📁</span> ' + t + ' ▸</div>';
+        }
+        const t = String(n.title || n.url).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        const url = String(n.url || '').replace(/"/g, '&quot;');
+        const fav = faviconUrl(n.url);
+        return '<div class="br-fav-menu-item" data-bmurl="' + url + '">' +
+                 (fav ? '<img src="' + fav + '" style="width:14px;height:14px;vertical-align:middle;margin-right:4px" onerror="this.style.display=\'none\'" />' : '') +
+                 '<span style="vertical-align:middle">' + t + '</span>' +
+               '</div>';
+      }).join('');
+    }
+    document.body.appendChild(menu);
+    // 绑定子项
+    menu.querySelectorAll('[data-bmurl]').forEach((el) => {
+      el.addEventListener('click', () => { openBrowser(el.dataset.bmurl); menu.remove(); });
+    });
+    menu.querySelectorAll('[data-subfolder]').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showBookmarkFolderMenu(el, el.dataset.subfolder);
+      });
+    });
+    // 点击外部关闭
+    setTimeout(() => {
+      const close = (e) => {
+        if (!menu.contains(e.target) && e.target !== anchor && !anchor.contains(e.target)) {
+          menu.remove();
+          document.removeEventListener('click', close, true);
+        }
+      };
+      document.addEventListener('click', close, true);
+    }, 0);
+  }
+
+  // 递归渲染收藏夹树
+  function renderFavTree(nodes, depth) {
+    depth = depth || 0;
+    const pad = depth * 16;
+    return nodes.map((n) => {
+      if (n.type === 'folder') {
+        const expanded = expandedFolders.has(n.id);
+        const hasChildren = (n.children && n.children.length) || true;
+        const arrow = hasChildren ? (expanded ? '▾' : '▸') : '·';
+        const title = String(n.title || '文件夹').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        let html = '<div class="br-fav-item br-fav-folder-node" data-folder="' + n.id + '" style="padding-left:' + (8 + pad) + 'px">' +
+                     '<span class="br-fav-arrow" data-folder="' + n.id + '">' + arrow + '</span>' +
+                     '<svg class="br-fav-folder-icon" viewBox="0 0 16 16" width="14" height="14"><path d="M1.5 4.5a1 1 0 0 1 1-1h3l1.5 1.5h6a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-9.5a1 1 0 0 1-1-1v-6.5z" fill="currentColor" opacity="0.85"/></svg>' +
+                     '<span class="br-fav-title">' + title + '</span>' +
+                     '<button class="br-fav-del" data-del="' + n.id + '" title="删除文件夹">×</button>' +
+                   '</div>';
+        if (expanded && n.children && n.children.length) {
+          html += renderFavTree(n.children, depth + 1);
+        } else if (expanded && (!n.children || !n.children.length)) {
+          html += '<div class="br-fav-empty-sub" style="padding-left:' + (8 + pad + 24) + 'px">（空）</div>';
+        }
+        return html;
+      }
+      // url 节点
+      const title = String(n.title || n.url).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const url = String(n.url || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+      const fav = faviconUrl(n.url);
+      return '<div class="br-fav-item br-fav-url-node" data-url="' + url + '" style="padding-left:' + (8 + pad + 16) + 'px">' +
+               (fav ? '<img class="br-fav-icon" src="' + fav + '" alt="" onerror="this.style.display=\'none\'" />' : '<span class="br-fav-icon-placeholder"></span>') +
+               '<div class="br-fav-item-main">' +
+                 '<span class="br-fav-title">' + title + '</span>' +
+                 '<span class="br-fav-url">' + url + '</span>' +
+               '</div>' +
+               '<button class="br-fav-del" data-del="' + n.id + '" title="移除收藏">×</button>' +
+             '</div>';
+    }).join('');
+  }
+
+  function renderFavPanel() {
+    const body = $('br-fav-list-body');
+    if (!body) return;
+    const tree = getBookmarks();
+    const kw = trim(($('br-fav-search') || {}).value || '').toLowerCase();
+    if (kw) {
+      // 搜索模式：扁平展示匹配的 url 节点
+      const matches = [];
+      const walk = (nodes) => {
+        for (const n of nodes) {
+          if (n.type === 'url') {
+            if ((n.title || '').toLowerCase().includes(kw) || (n.url || '').toLowerCase().includes(kw)) matches.push(n);
+          } else if (n.children) walk(n.children);
+        }
+      };
+      walk(tree);
+      if (matches.length === 0) { body.innerHTML = '<div class="br-fav-empty">没有匹配的收藏</div>'; return; }
+      body.innerHTML = matches.map((n) => {
+        const title = String(n.title || n.url).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const url = String(n.url || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+        const fav = faviconUrl(n.url);
+        return '<div class="br-fav-item br-fav-url-node" data-url="' + url + '">' +
+                 (fav ? '<img class="br-fav-icon" src="' + fav + '" alt="" onerror="this.style.display=\'none\'" />' : '<span class="br-fav-icon-placeholder"></span>') +
+                 '<div class="br-fav-item-main"><span class="br-fav-title">' + title + '</span><span class="br-fav-url">' + url + '</span></div>' +
+                 '<button class="br-fav-del" data-del="' + n.id + '" title="移除收藏">×</button>' +
+               '</div>';
+      }).join('');
+    } else {
+      const hasUrls = flattenUrls(tree).length > 0;
+      const html = renderFavTree(tree, 0);
+      body.innerHTML = hasUrls ? html : '<div class="br-fav-empty">还没有收藏，点击工具栏 ⭐ 添加当前页，或从 ··· 菜单导入</div>';
+    }
+    // 绑定事件
+    body.querySelectorAll('[data-folder]').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        if (e.target.classList.contains('br-fav-del')) return;
+        toggleFolder(el.dataset.folder);
+      });
+    });
+    body.querySelectorAll('.br-fav-url-node').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        if (e.target.classList.contains('br-fav-del')) return;
+        openBrowser(el.dataset.url);
+      });
+    });
+    body.querySelectorAll('[data-del]').forEach((btn) => {
+      btn.addEventListener('click', (e) => { e.stopPropagation(); removeBookmark(btn.dataset.del); });
+    });
+  }
+
+  // 从 Edge 本地书签文件导入（间接同步 Edge 账号收藏夹）
+  async function importEdgeBookmarks() {
+    const menuItem = $('br-fav-menu-import');
+    if (menuItem) { menuItem.classList.add('is-loading'); menuItem.textContent = '导入中…'; }
+    try {
+      const res = await (window.workbench && workbench.edge ? workbench.edge.readBookmarks() : Promise.resolve({ ok: false }));
+      if (!res || !res.ok) {
+        const reason = (res && res.reason) || '';
+        toast(reason === 'edge-not-installed' ? '未检测到 Edge 浏览器' : '读取 Edge 书签失败', 'err');
+        return;
+      }
+      const incoming = Array.isArray(res.bookmarks) ? res.bookmarks : [];
+      if (incoming.length === 0) { toast('Edge 书签为空', 'ok'); return; }
+      const tree = getBookmarks();
+      const existing = new Set(flattenUrls(tree));
+      // 按文件夹分组导入到「收藏夹栏」下，保持 Edge 的文件夹结构
+      const bar = tree.find((n) => n.id === 'fav-bar') || tree[0];
+      bar.children = bar.children || [];
+      // 建立 Edge 文件夹路径 → 本地文件夹 id 的映射
+      const folderMap = {};
+      let added = 0;
+      for (const item of incoming) {
+        if (existing.has(item.url)) continue;
+        const folderName = item.folder || 'Edge 导入';
+        if (!folderMap[folderName]) {
+          const f = { id: newId(), type: 'folder', title: folderName, children: [] };
+          bar.children.push(f);
+          folderMap[folderName] = f;
+        }
+        folderMap[folderName].children.push({ id: newId(), type: 'url', title: item.title || item.url, url: item.url, addedAt: Date.now() });
+        existing.add(item.url);
+        added++;
+      }
+      setBookmarks(tree);
+      expandedFolders.add(bar.id);
+      renderFavPanel();
+      toast('已从 Edge 导入 ' + added + ' 条书签', 'ok');
+    } finally {
+      if (menuItem) { menuItem.classList.remove('is-loading'); menuItem.textContent = '导入收藏夹…'; }
+    }
+  }
+
+  // 导出收藏夹为 HTML 文件（Netscape 格式，可被各浏览器导入）
+  function exportBookmarks() {
+    const tree = getBookmarks();
+    const lines = ['<!DOCTYPE NETSCAPE-Bookmark-file-1>', '<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">', '<TITLE>工作台收藏夹</TITLE>', '<H1>工作台收藏夹</H1>', '<DL><p>'];
+    const walk = (nodes, depth) => {
+      for (const n of nodes) {
+        const indent = '  '.repeat(depth + 1);
+        if (n.type === 'folder') {
+          lines.push(indent + '<DT><H3>' + (n.title || '文件夹') + '</H3>');
+          lines.push(indent + '<DL><p>');
+          walk(n.children || [], depth + 1);
+          lines.push(indent + '</DL><p>');
+        } else if (n.type === 'url') {
+          const ts = n.addedAt ? Math.floor(n.addedAt / 1000) : Math.floor(Date.now() / 1000);
+          lines.push(indent + '<DT><A HREF="' + String(n.url || '').replace(/"/g, '&quot;') + '" ADD_DATE="' + ts + '">' + (n.title || n.url) + '</A>');
+        }
+      }
+    };
+    walk(tree, 0);
+    lines.push('</DL><p>');
+    const blob = new Blob([lines.join('\n')], { type: 'text/html;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'bookmarks_' + new Date().toISOString().slice(0, 10) + '.html';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    toast('已导出收藏夹', 'ok');
+  }
+
+  // 删除重复的收藏夹（按 url 去重，保留首个）
+  function dedupBookmarks() {
+    const tree = getBookmarks();
+    const seen = new Set();
+    let removed = 0;
+    const walk = (nodes) => {
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const n = nodes[i];
+        if (n.type === 'folder') {
+          walk(n.children || []);
+          if (!n.children || n.children.length === 0) { nodes.splice(i, 1); removed++; }
+        } else if (n.type === 'url') {
+          if (seen.has(n.url)) { nodes.splice(i, 1); removed++; }
+          else seen.add(n.url);
+        }
+      }
+    };
+    walk(tree);
+    setBookmarks(tree);
+    renderFavPanel();
+    toast(removed > 0 ? '已删除 ' + removed + ' 个重复项' : '没有重复项', removed > 0 ? 'ok' : 'err');
+  }
+
+  /* ------------------------------ 更多菜单（···） ------------------------------ */
+
+  // 切换工具栏收藏夹栏（书签栏）的显示
+  function toggleFavBarVisible() {
+    state.settings.browser.showFavBar = !browserConfig().showFavBar;
+    scheduleSave();
+    renderBookmarkBar();
+    toast(state.settings.browser.showFavBar ? '已显示收藏夹栏' : '已隐藏收藏夹栏', 'ok');
+  }
+
+  // 打开收藏夹管理页（全屏视图，参考 edge://favorites）
+  function openBookmarksPage() {
+    hideFavMenu();
+    const page = $('bm-page');
+    if (!page) return;
+    page.classList.remove('hidden');
+    ui.bmSelectedFolder = 'fav-bar';
+    renderBmPage();
+  }
+  function closeBookmarksPage() {
+    const page = $('bm-page');
+    if (page) page.classList.add('hidden');
+  }
+
+  // 渲染收藏夹管理页
+  function renderBmPage() {
+    const page = $('bm-page');
+    if (!page || page.classList.contains('hidden')) return;
+    const tree = getBookmarks();
+    const sel = ui.bmSelectedFolder || 'fav-bar';
+    // 左侧文件夹树
+    const side = $('bm-side-list');
+    if (side) {
+      side.innerHTML = renderBmSideTree(tree, 0);
+      side.querySelectorAll('[data-bmfolder]').forEach((el) => {
+        el.addEventListener('click', (e) => {
+          e.stopPropagation();
+          ui.bmSelectedFolder = el.dataset.bmfolder;
+          renderBmPage();
+        });
+      });
+    }
+    // 右侧：选中文件夹的书签（或搜索结果）
+    const r = findNode(sel, tree, null);
+    const folder = r ? r.node : tree.find((n) => n.id === 'fav-bar');
+    const main = $('bm-main-list');
+    const head = $('bm-main-head');
+    const kw = trim(($('bm-search') || {}).value || '').toLowerCase();
+    let items;
+    if (kw) {
+      // 搜索模式：在所有书签中查找
+      items = [];
+      const walk = (nodes) => { for (const n of nodes) { if (n.type === 'url') items.push(n); else if (n.children) walk(n.children); } };
+      walk(tree);
+      items = items.filter((n) => (n.title || '').toLowerCase().includes(kw) || (n.url || '').toLowerCase().includes(kw));
+      if (head) head.textContent = '搜索结果（' + items.length + '）';
+    } else {
+      items = (folder && folder.children) || [];
+      if (head) head.textContent = (folder && folder.title) || '收藏夹';
+    }
+    if (!main) return;
+    if (items.length === 0) {
+      main.innerHTML = '<div class="bm-empty">此文件夹为空</div>';
+      return;
+    }
+    main.innerHTML = items.map((n) => {
+      const title = String(n.title || (n.type === 'folder' ? '文件夹' : n.url)).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      if (n.type === 'folder') {
+        return '<div class="bm-item bm-folder" data-bmfolder="' + n.id + '">' +
+                 '<svg class="bm-icon" viewBox="0 0 16 16" width="18" height="18"><path d="M1.5 4.5a1 1 0 0 1 1-1h3l1.5 1.5h6a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-9.5a1 1 0 0 1-1-1v-6.5z" fill="currentColor" opacity="0.8"/></svg>' +
+                 '<span class="bm-name">' + title + '</span>' +
+                 '<div class="bm-actions"><button class="bm-btn" data-bmrename="' + n.id + '">重命名</button><button class="bm-btn bm-danger" data-bmdel="' + n.id + '">删除</button></div>' +
+               '</div>';
+      }
+      const url = String(n.url || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+      const fav = faviconUrl(n.url);
+      return '<div class="bm-item" data-bmurl="' + url + '">' +
+               (fav ? '<img class="bm-fav" src="' + fav + '" alt="" onerror="this.style.display=\'none\'" />' : '<span class="bm-fav-placeholder"></span>') +
+               '<div class="bm-info"><span class="bm-name">' + title + '</span><span class="bm-url">' + url + '</span></div>' +
+               '<div class="bm-actions"><button class="bm-btn" data-bmopen="' + n.id + '">打开</button><button class="bm-btn" data-bmrename="' + n.id + '">编辑</button><button class="bm-btn bm-danger" data-bmdel="' + n.id + '">删除</button></div>' +
+             '</div>';
+    }).join('');
+    // 绑定右侧事件
+    main.querySelectorAll('[data-bmfolder]').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        if (e.target.closest('.bm-actions')) return;
+        ui.bmSelectedFolder = el.dataset.bmfolder;
+        renderBmPage();
+      });
+    });
+    main.querySelectorAll('[data-bmurl]').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        if (e.target.closest('.bm-actions')) return;
+        openBrowser(el.dataset.bmurl);
+      });
+    });
+    main.querySelectorAll('[data-bmopen]').forEach((btn) => {
+      btn.addEventListener('click', (e) => { e.stopPropagation(); const id = btn.dataset.bmopen; const r2 = findNode(id, getBookmarks(), null); if (r2 && r2.node.url) openBrowser(r2.node.url); });
+    });
+    main.querySelectorAll('[data-bmrename]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.bmrename;
+        const r2 = findNode(id, getBookmarks(), null);
+        if (!r2) return;
+        inputDialog(r2.node.type === 'folder' ? '重命名文件夹' : '编辑书签', r2.node.type === 'folder' ? '名称' : '标题', r2.node.title || '', (v) => {
+          const tree2 = getBookmarks();
+          const r3 = findNode(id, tree2, null);
+          if (r3) { r3.node.title = v; setBookmarks(tree2); renderBmPage(); renderBookmarkBar(); toast('已保存', 'ok'); }
+        });
+      });
+    });
+    main.querySelectorAll('[data-bmdel]').forEach((btn) => {
+      btn.addEventListener('click', (e) => { e.stopPropagation(); removeBookmark(btn.dataset.bmdel); });
+    });
+  }
+
+  // 管理页左侧文件夹树渲染
+  function renderBmSideTree(nodes, depth) {
+    depth = depth || 0;
+    const sel = ui.bmSelectedFolder || 'fav-bar';
+    return nodes.map((n) => {
+      if (n.type !== 'folder') return '';
+      const isSel = n.id === sel;
+      const title = String(n.title || '文件夹').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      let html = '<div class="bm-side-item' + (isSel ? ' bm-side-active' : '') + '" data-bmfolder="' + n.id + '" style="padding-left:' + (8 + depth * 14) + 'px">' +
+                   '<svg viewBox="0 0 16 16" width="14" height="14"><path d="M1.5 4.5a1 1 0 0 1 1-1h3l1.5 1.5h6a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-9.5a1 1 0 0 1-1-1v-6.5z" fill="currentColor" opacity="0.8"/></svg>' +
+                   '<span>' + title + '</span>' +
+                 '</div>';
+      if (n.children && n.children.some((c) => c.type === 'folder')) {
+        html += renderBmSideTree(n.children.filter((c) => c.type === 'folder'), depth + 1);
+      }
+      return html;
+    }).join('');
+  }
+
+  const FAV_MENU_ITEMS = [
+    { id: 'open-page', label: '打开收藏夹页面', action: openBookmarksPage },
+    { id: 'add-current', label: '将此页添加到收藏夹', action: addCurrentBookmark },
+    { id: 'add-all-tabs', label: '将打开的页面添加到收藏夹', action: addAllOpenTabs },
+    { id: 'add-folder', label: '添加文件夹', action: addFolder },
+    { divider: true },
+    { id: 'import', label: '导入收藏夹…', action: importEdgeBookmarks },
+    { id: 'export', label: '导出收藏夹', action: exportBookmarks },
+    { id: 'dedup', label: '删除重复的收藏夹', action: dedupBookmarks },
+    { divider: true },
+    { id: 'toggle-favbar', label: '显示收藏夹栏', type: 'toggle', checked: () => browserConfig().showFavBar === true, action: toggleFavBarVisible },
+  ];
+
+  function showFavMenu(anchor) {
+    let menu = $('br-fav-menu');
+    if (!menu) {
+      menu = document.createElement('div');
+      menu.id = 'br-fav-menu';
+      menu.className = 'br-fav-menu';
+      const panel = $('br-fav-panel');
+      if (panel) panel.appendChild(menu);
+    }
+    menu.innerHTML = FAV_MENU_ITEMS.map((it) => {
+      if (it.divider) return '<div class="br-fav-menu-divider"></div>';
+      const check = it.type === 'toggle' && it.checked && it.checked() ? '✓ ' : '';
+      return '<div class="br-fav-menu-item' + (it.type === 'toggle' ? ' br-fav-menu-toggle' : '') + '" data-action="' + it.id + '" id="br-fav-menu-' + it.id + '"><span class="br-fav-menu-check">' + check + '</span>' + it.label + '</div>';
+    }).join('');
+    menu.classList.remove('hidden');
+    menu.querySelectorAll('[data-action]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const item = FAV_MENU_ITEMS.find((x) => x.id === el.dataset.action);
+        // toggle 类型不关闭菜单，便于看到状态变化
+        if (!item || item.type !== 'toggle') hideFavMenu();
+        if (item) item.action();
+        // toggle 类型刷新菜单勾选状态
+        if (item && item.type === 'toggle') showFavMenu($('br-fav-more'));
+      });
+    });
+    // 定位到锚点（···按钮）下方
+    if (anchor) {
+      const rect = anchor.getBoundingClientRect();
+      const panelRect = ($('br-fav-panel') || {}).getBoundingClientRect ? $('br-fav-panel').getBoundingClientRect() : { left: 0, top: 0 };
+      menu.style.right = '8px';
+      menu.style.top = '40px';
+    }
+    // 点击外部关闭
+    setTimeout(() => {
+      document.addEventListener('click', closeFavMenuOnOut, true);
+    }, 0);
+  }
+  function closeFavMenuOnOut(e) {
+    const menu = $('br-fav-menu');
+    const moreBtn = $('br-fav-more');
+    if (!menu) return;
+    if (menu.contains(e.target) || (moreBtn && moreBtn.contains(e.target))) return;
+    hideFavMenu();
+  }
+  function hideFavMenu() {
+    const menu = $('br-fav-menu');
+    if (menu) menu.classList.add('hidden');
+    document.removeEventListener('click', closeFavMenuOnOut, true);
+  }
+
+  /* ------------------------------ 密码管理器 ------------------------------ */
+
+  // 展开的网站分组（运行时）
+  const expandedSites = new Set();
+
+  function getPasswords() {
+    const b = browserConfig();
+    return Array.isArray(b.passwords) ? b.passwords : [];
+  }
+  function setPasswords(list) {
+    state.settings.browser.passwords = list;
+    scheduleSave();
+  }
+
+  function togglePwdPanel() {
+    const panel = $('br-pwd-panel');
+    if (!panel) return;
+    const willShow = panel.classList.contains('hidden');
+    panel.classList.toggle('hidden', !willShow);
+    // 关闭收藏夹面板，避免重叠
+    if (willShow) { const fp = $('br-fav-panel'); if (fp) fp.classList.add('hidden'); }
+    if (willShow) renderPwdPanel();
+  }
+
+  // 从 URL 提取网站名（去掉协议和路径）
+  function siteFromUrl(url) {
+    try {
+      const u = new URL(url);
+      return u.hostname.replace(/^www\./, '');
+    } catch (_) { return url || ''; }
+  }
+
+  function renderPwdPanel() {
+    const body = $('br-pwd-list-body');
+    if (!body) return;
+    const list = getPasswords();
+    const kw = trim(($('br-pwd-search') || {}).value || '').toLowerCase();
+    // 按 site 分组
+    const groups = {};
+    for (const p of list) {
+      if (kw && !(p.site || '').toLowerCase().includes(kw) && !(p.username || '').toLowerCase().includes(kw) && !(p.note || '').toLowerCase().includes(kw)) continue;
+      const s = p.site || '未分类';
+      if (!groups[s]) groups[s] = [];
+      groups[s].push(p);
+    }
+    const sites = Object.keys(groups).sort();
+    if (sites.length === 0) {
+      body.innerHTML = '<div class="br-fav-empty">' + (list.length === 0 ? '还没有保存的密码，点击右上角 + 添加' : '没有匹配的密码') + '</div>';
+      return;
+    }
+    body.innerHTML = sites.map((site) => {
+      const items = groups[site];
+      const expanded = expandedSites.has(site);
+      const arrow = expanded ? '▾' : '▸';
+      const fav = 'https://icons.duckduckgo.com/ip3/' + site.replace(/^www\./, '') + '.ico';
+      let html = '<div class="br-pwd-site" data-site="' + site.replace(/"/g, '&quot;') + '">' +
+                   '<div class="br-pwd-site-head">' +
+                     '<span class="br-pwd-arrow">' + arrow + '</span>' +
+                     '<img class="br-pwd-fav" src="' + fav + '" alt="" onerror="this.style.display=\'none\'" />' +
+                     '<span class="br-pwd-site-name">' + site.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</span>' +
+                     '<span class="br-pwd-count">' + items.length + ' 个账户</span>' +
+                   '</div>';
+      if (expanded) {
+        html += '<div class="br-pwd-items">';
+        for (const p of items) {
+          const user = String(p.username || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+          html += '<div class="br-pwd-item" data-id="' + p.id + '">' +
+                    '<div class="br-pwd-item-row">' +
+                      '<span class="br-pwd-label">用户名</span>' +
+                      '<span class="br-pwd-value" data-copy="user">' + user + '</span>' +
+                      '<button class="br-pwd-copy" data-copy-user="' + p.id + '" title="复制用户名">复制</button>' +
+                    '</div>' +
+                    '<div class="br-pwd-item-row">' +
+                      '<span class="br-pwd-label">密码</span>' +
+                      '<span class="br-pwd-value br-pwd-pass" data-pass="' + p.id + '">••••••••</span>' +
+                      '<button class="br-pwd-eye-btn" data-eye="' + p.id + '" title="显示/隐藏">👁</button>' +
+                      '<button class="br-pwd-copy" data-copy-pass="' + p.id + '" title="复制密码">复制</button>' +
+                    '</div>' +
+                    '<div class="br-pwd-item-actions">' +
+                      '<button class="br-pwd-fill" data-fill="' + p.id + '" title="尝试填充到当前页">填充到当前页</button>' +
+                      '<button class="br-pwd-del" data-del="' + p.id + '" title="删除">删除</button>' +
+                    '</div>' +
+                  '</div>';
+        }
+        html += '</div>';
+      }
+      html += '</div>';
+      return html;
+    }).join('');
+    // 绑定事件
+    body.querySelectorAll('.br-pwd-site-head').forEach((el) => {
+      el.addEventListener('click', () => {
+        const site = el.parentElement.dataset.site;
+        if (expandedSites.has(site)) expandedSites.delete(site);
+        else expandedSites.add(site);
+        renderPwdPanel();
+      });
+    });
+    body.querySelectorAll('[data-copy-user]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const p = getPasswords().find((x) => x.id === btn.dataset.copyUser);
+        if (p) copyText(p.username || '');
+      });
+    });
+    body.querySelectorAll('[data-copy-pass]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const p = getPasswords().find((x) => x.id === btn.dataset.copyPass);
+        if (p) copyText(p.password || '');
+      });
+    });
+    body.querySelectorAll('[data-eye]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const id = btn.dataset.eye;
+        const passEl = body.querySelector('[data-pass="' + id + '"]');
+        const p = getPasswords().find((x) => x.id === id);
+        if (!passEl || !p) return;
+        if (passEl.dataset.shown === '1') {
+          passEl.textContent = '••••••••';
+          passEl.dataset.shown = '';
+        } else {
+          passEl.textContent = p.password || '';
+          passEl.dataset.shown = '1';
+        }
+      });
+    });
+    body.querySelectorAll('[data-fill]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        fillPasswordToPage(btn.dataset.fill);
+      });
+    });
+    body.querySelectorAll('[data-del]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        confirmDialog('删除确认', '确定删除这条密码？', '删除', () => {
+          const list = getPasswords().filter((x) => x.id !== btn.dataset.del);
+          setPasswords(list);
+          renderPwdPanel();
+          toast('已删除', 'ok');
+        });
+      });
+    });
+  }
+
+  function copyText(text) {
+    if (!text) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => toast('已复制', 'ok')).catch(() => fallbackCopy(text));
+    } else {
+      fallbackCopy(text);
+    }
+  }
+  function fallbackCopy(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); toast('已复制', 'ok'); } catch (_) { toast('复制失败', 'err'); }
+    ta.remove();
+  }
+
+  // 尝试把密码填充到当前页（通过 webview 注入 JS 查找常见输入框）
+  function fillPasswordToPage(id) {
+    const p = getPasswords().find((x) => x.id === id);
+    if (!p) return;
+    const wv = activeWebview();
+    if (!wv) { toast('请先打开浏览器页面', 'err'); return; }
+    const user = JSON.stringify(p.username || '');
+    const pass = JSON.stringify(p.password || '');
+    const script = `
+      (function(){
+        var u = ${user}, p = ${pass};
+        var inputs = document.querySelectorAll('input');
+        var userField, passField;
+        for (var i = 0; i < inputs.length; i++) {
+          var inp = inputs[i], t = (inp.type || '').toLowerCase(), name = (inp.name || inp.id || '').toLowerCase();
+          if (t === 'password') { passField = inp; break; }
+          if ((t === 'text' || t === 'email' || t === 'tel' || t === '') && /user|name|account|login|email|phone|mobile|account/i.test(name)) { userField = inp; }
+        }
+        if (userField) { try { userField.focus(); userField.value = u; userField.dispatchEvent(new Event('input', {bubbles:true})); userField.dispatchEvent(new Event('change', {bubbles:true})); } catch(e){} }
+        if (passField) { try { passField.focus(); passField.value = p; passField.dispatchEvent(new Event('input', {bubbles:true})); passField.dispatchEvent(new Event('change', {bubbles:true})); } catch(e){} }
+      })();
+    `;
+    try {
+      wv.executeJavaScript(script);
+      toast('已尝试填充，如未生效请手动复制', 'ok');
+    } catch (_) {
+      toast('填充失败，请手动复制密码', 'err');
+    }
+  }
+
+  function showPwdAddForm() {
+    const form = $('br-pwd-add-form');
+    if (!form) return;
+    form.classList.remove('hidden');
+    // 预填当前网站
+    const tab = activeTab();
+    if (tab && tab.url) {
+      const site = siteFromUrl(tab.url);
+      const inp = $('br-pwd-in-site');
+      if (inp && site) inp.value = site;
+    }
+    const first = $('br-pwd-in-site');
+    if (first) first.focus();
+  }
+  function hidePwdAddForm() {
+    const form = $('br-pwd-add-form');
+    if (form) form.classList.add('hidden');
+    // 清空
+    ['br-pwd-in-site', 'br-pwd-in-user', 'br-pwd-in-pass', 'br-pwd-in-note'].forEach((id) => { const el = $(id); if (el) el.value = ''; });
+  }
+
+  function savePwd() {
+    const site = trim($('br-pwd-in-site').value);
+    const username = trim($('br-pwd-in-user').value);
+    const password = $('br-pwd-in-pass').value;
+    const note = trim($('br-pwd-in-note').value);
+    if (!site) { toast('请填写网站', 'err'); return; }
+    if (!username && !password) { toast('请填写用户名或密码', 'err'); return; }
+    const list = getPasswords().slice();
+    list.push({ id: newId(), site, username, password, note, addedAt: Date.now() });
+    setPasswords(list);
+    expandedSites.add(site);
+    hidePwdAddForm();
+    renderPwdPanel();
+    toast('密码已保存', 'ok');
+  }
+
+  function bindBrowserEvents() {
+    el.browser = $('browser');
+    el.brAddr = $('br-addr');
+    el.brBack = $('br-back');
+    el.brForward = $('br-forward');
+
+    $('btn-browser').addEventListener('click', () => {
+      if (ui.browserOpen) closeBrowser();
+      else openBrowser();
+    });
+
+    // 工具栏按钮：操作当前激活标签的 webview
+    if (el.brBack) el.brBack.addEventListener('click', () => { const wv = activeWebview(); if (wv) { try { wv.goBack(); } catch (_) {} } });
+    if (el.brForward) el.brForward.addEventListener('click', () => { const wv = activeWebview(); if (wv) { try { wv.goForward(); } catch (_) {} } });
+    const reloadBtn = $('br-reload');
+    if (reloadBtn) reloadBtn.addEventListener('click', () => {
+      const wv = activeWebview();
+      if (!wv) return;
+      try {
+        const tab = activeTab();
+        if (tab && tab.loading) wv.stop();
+        else wv.reload();
+      } catch (_) {}
+    });
+    const homeBtn = $('br-home');
+    if (homeBtn) homeBtn.addEventListener('click', () => loadBrowserUrl(getHomeUrl()));
+    const goBtn = $('br-go');
+    if (goBtn) goBtn.addEventListener('click', () => loadBrowserUrl(el.brAddr.value));
+    el.brAddr.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); loadBrowserUrl(el.brAddr.value); el.brAddr.blur(); }
+    });
+
+    // 收藏夹：添加当前页 / 打开收藏夹面板 / 更多菜单
+    const favAddBtn = $('br-fav-add');
+    if (favAddBtn) favAddBtn.addEventListener('click', addCurrentBookmark);
+    const favAddFolderBtn = $('br-fav-add-folder');
+    if (favAddFolderBtn) favAddFolderBtn.addEventListener('click', addFolder);
+    const favSearchToggle = $('br-fav-search-toggle');
+    if (favSearchToggle) favSearchToggle.addEventListener('click', () => {
+      const row = $('br-fav-search-row');
+      if (row) {
+        row.classList.toggle('hidden');
+        if (!row.classList.contains('hidden')) {
+          const inp = $('br-fav-search');
+          if (inp) inp.focus();
+        } else {
+          const inp = $('br-fav-search');
+          if (inp) inp.value = '';
+          renderFavPanel();
+        }
+      }
+    });
+    const favListBtn = $('br-fav-list');
+    if (favListBtn) favListBtn.addEventListener('click', toggleFavPanel);
+    const favCloseBtn = $('br-fav-close');
+    if (favCloseBtn) favCloseBtn.addEventListener('click', toggleFavPanel);
+    const favMoreBtn = $('br-fav-more');
+    if (favMoreBtn) favMoreBtn.addEventListener('click', (e) => { e.stopPropagation(); showFavMenu(favMoreBtn); });
+    const favSearch = $('br-fav-search');
+    if (favSearch) favSearch.addEventListener('input', renderFavPanel);
+
+    // 密码管理器
+    const pwdBtn = $('br-pwd');
+    if (pwdBtn) pwdBtn.addEventListener('click', togglePwdPanel);
+    const pwdCloseBtn = $('br-pwd-close');
+    if (pwdCloseBtn) pwdCloseBtn.addEventListener('click', togglePwdPanel);
+    const pwdAddBtn = $('br-pwd-add');
+    if (pwdAddBtn) pwdAddBtn.addEventListener('click', showPwdAddForm);
+    const pwdCancelBtn = $('br-pwd-cancel');
+    if (pwdCancelBtn) pwdCancelBtn.addEventListener('click', hidePwdAddForm);
+    const pwdSaveBtn = $('br-pwd-save');
+    if (pwdSaveBtn) pwdSaveBtn.addEventListener('click', savePwd);
+    const pwdSearchToggle = $('br-pwd-search-toggle');
+    if (pwdSearchToggle) pwdSearchToggle.addEventListener('click', () => {
+      const row = $('br-pwd-search-row');
+      if (row) {
+        row.classList.toggle('hidden');
+        if (!row.classList.contains('hidden')) {
+          const inp = $('br-pwd-search');
+          if (inp) inp.focus();
+        } else {
+          const inp = $('br-pwd-search');
+          if (inp) inp.value = '';
+          renderPwdPanel();
+        }
+      }
+    });
+    const pwdSearch = $('br-pwd-search');
+    if (pwdSearch) pwdSearch.addEventListener('input', renderPwdPanel);
+    const pwdInEye = $('br-pwd-in-eye');
+    if (pwdInEye) pwdInEye.addEventListener('click', () => {
+      const inp = $('br-pwd-in-pass');
+      if (inp) inp.type = inp.type === 'password' ? 'text' : 'password';
+    });
+    // 保存密码开关
+    const saveToggle = $('br-pwd-save-toggle');
+    if (saveToggle) {
+      saveToggle.checked = browserConfig().savePasswords !== false;
+      saveToggle.addEventListener('change', () => {
+        state.settings.browser.savePasswords = saveToggle.checked;
+        scheduleSave();
+        toast(saveToggle.checked ? '已启用密码保存' : '已关闭密码保存', 'ok');
+      });
+    }
+
+    // 收藏夹管理页按钮
+    const bmClose = $('bm-close');
+    if (bmClose) bmClose.addEventListener('click', closeBookmarksPage);
+    const bmAddUrl = $('bm-add-url');
+    if (bmAddUrl) bmAddUrl.addEventListener('click', () => {
+      const sel = ui.bmSelectedFolder || 'fav-bar';
+      inputDialog('添加书签', '请输入网址', '', (url) => {
+        url = trim(url);
+        if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+        inputDialog('书签标题', '请输入标题', url, (title) => {
+          const tree = getBookmarks();
+          const r = findNode(sel, tree, null);
+          const folder = (r && r.node.type === 'folder') ? r.node : (tree.find((n) => n.id === 'fav-bar'));
+          folder.children = folder.children || [];
+          folder.children.push({ id: newId(), type: 'url', title: title || url, url, addedAt: Date.now() });
+          setBookmarks(tree);
+          toast('已添加书签', 'ok');
+        });
+      });
+    });
+    const bmAddFolder = $('bm-add-folder');
+    if (bmAddFolder) bmAddFolder.addEventListener('click', () => {
+      const sel = ui.bmSelectedFolder || 'fav-bar';
+      inputDialog('新建文件夹', '请输入文件夹名称', '新建文件夹', (name) => {
+        const tree = getBookmarks();
+        const r = findNode(sel, tree, null);
+        const folder = (r && r.node.type === 'folder') ? r.node : (tree.find((n) => n.id === 'fav-bar'));
+        folder.children = folder.children || [];
+        folder.children.push({ id: newId(), type: 'folder', title: name, children: [] });
+        setBookmarks(tree);
+        toast('已新建文件夹', 'ok');
+      });
+    });
+    const bmSearch = $('bm-search');
+    if (bmSearch) bmSearch.addEventListener('input', () => {
+      renderBmPage();
+    });
+
+    // 启动时按设置同步主页按钮显隐
+    if (homeBtn) homeBtn.classList.toggle('hidden', browserConfig().homeButton === false);
+
+    // 主进程拦截的新窗口请求 → 在内嵌浏览器新开标签页
+    if (api.onBrowserNewTab) api.onBrowserNewTab((url) => { if (url) newTab(url, true); });
+
+    // 齿轮按钮 → 跳转到设置页的浏览器分页
+    const brSettings = $('br-settings');
+    if (brSettings) brSettings.addEventListener('click', () => {
+      closeBrowser();
+      openSettings('browser');
+    });
   }
 
   function stopRestStatusTimer() {
@@ -449,6 +2754,17 @@
     else if (t && t.source === 'dark') html.setAttribute('data-theme', 'dark');
     else html.setAttribute('data-theme', (t && t.dark) ? 'dark' : 'light');
     paintThemeBtn();
+    applyBrowserTheme();
+  }
+
+  // 浏览器外观主题：system 跟随工作台（移除 data-theme 继承 html）；light/dark 强制指定
+  function applyBrowserTheme() {
+    const b = (state && state.settings && state.settings.browser) || DEFAULT_BROWSER;
+    const el = $('browser');
+    if (!el) return;
+    if (b.theme === 'light') el.dataset.theme = 'light';
+    else if (b.theme === 'dark') el.dataset.theme = 'dark';
+    else el.removeAttribute('data-theme');
   }
 
   // 标题栏主题按钮：图标由 CSS 按 data-theme 切换（浅色=太阳 / 深色=月亮），这里只更新提示文案
@@ -473,27 +2789,141 @@
     return s > 60 ? Math.ceil(s / 60) + '分' : s + '秒';
   }
 
-  // 标题栏居中的休息状态：空闲中 / X分后提醒休息 / 休息倒计时 X分 / 强制休息还剩 X分
+  // 右下角休息提示 + 代理状态胶囊（水平排列）
   function paintTbRest(st) {
     const tb = $('tb-rest');
     if (!tb) return;
+    tb.innerHTML = '';
+    // 休息提醒胶囊（与代理胶囊同风格）
+    const restSpan = document.createElement('span');
     if (!st || st.enabled === false) {
-      tb.textContent = '';
       tb.className = 'tb-rest';
+    } else {
+      const state = st.state || 'idle';
+      let text = '空闲中';
+      if (state === 'working') {
+        const remain = Math.max(0, (Number(st.workSecondsTotal) || 0) - (Number(st.usedSeconds) || 0));
+        text = fmtRemain(remain) + '后提醒休息';
+      } else if (state === 'reminding') {
+        text = '休息倒计时 ' + fmtRemain(st.countdownSeconds);
+      } else if (state === 'resting') {
+        text = st.mode === 'mode2' ? '强制休息中 · 锁屏中' : '强制休息还剩 ' + fmtRemain(st.restSeconds);
+      }
+      restSpan.className = 'rest-pill rest-state-' + state;
+      restSpan.title = '点击打开休息设置';
+      const dot = document.createElement('i');
+      dot.className = 'rd';
+      restSpan.appendChild(dot);
+      const label = document.createElement('span');
+      label.textContent = text;
+      restSpan.appendChild(label);
+      tb.className = 'tb-rest rest-state-' + state;
+    }
+    if (restSpan.className) tb.appendChild(restSpan);
+    // 代理胶囊（同一容器右侧，独立子元素）
+    paintProxyPill(tb);
+  }
+
+  // 右下角代理状态胶囊：代理运行中 + 模式圆点 + 当前节点名 + 上下行速率
+  let pillTraffic = { t: 0, up: 0, down: 0, speed: { up: 0, down: 0 } };
+
+  function paintProxyPill(container) {
+    const ps = px.state;
+    if (!ps || !ps.running) {
+      // 代理停止后清掉残留胶囊
+      container.querySelectorAll('.proxy-pill').forEach((n) => n.remove());
       return;
     }
-    const state = st.state || 'idle';
-    let text = '空闲中';
-    if (state === 'working') {
-      const remain = Math.max(0, (Number(st.workSecondsTotal) || 0) - (Number(st.usedSeconds) || 0));
-      text = fmtRemain(remain) + '后提醒休息';
-    } else if (state === 'reminding') {
-      text = '休息倒计时 ' + fmtRemain(st.countdownSeconds);
-    } else if (state === 'resting') {
-      text = st.mode === 'mode2' ? '强制休息中 · 锁屏中' : '强制休息还剩 ' + fmtRemain(st.restSeconds);
+    // 结构不变时只更新文字，避免每 2 秒重建 DOM
+    let pill = container.querySelector('.proxy-pill');
+    if (!pill) {
+      pill = document.createElement('span');
+      pill.className = 'proxy-pill';
+      pill.title = '点击进入代理页';
+      pill.addEventListener('click', (e) => { e.stopPropagation(); openProxy(); });
+      const txt = document.createElement('span');
+      txt.className = 'proxy-pill-text';
+      txt.textContent = '代理运行中';
+      pill.appendChild(txt);
+      const dots = document.createElement('span');
+      dots.className = 'proxy-pill-dots';
+      pill.appendChild(dots);
+      const node = document.createElement('span');
+      node.className = 'proxy-pill-node';
+      pill.appendChild(node);
+      const spd = document.createElement('span');
+      spd.className = 'proxy-pill-speed';
+      pill.appendChild(spd);
+      container.appendChild(pill);
     }
-    tb.textContent = text;
-    tb.className = 'tb-rest rest-state-' + state;
+    // 彩色圆点：按实际开启的模式，可叠加多个
+    const dots = pill.querySelector('.proxy-pill-dots');
+    const want = [];
+    if (ps.tunMode) want.push(['pd pd-tun', '虚拟网卡模式']);
+    if (ps.sysProxy) want.push(['pd pd-sys', '系统代理']);
+    if (ps.selfProxy) want.push(['pd pd-self', '自身代理']);
+    const cur = dots.getAttribute('data-key') || '';
+    const nextKey = want.map((w) => w[0]).join('|');
+    if (cur !== nextKey) {
+      dots.textContent = '';
+      want.forEach((w) => {
+        const d = document.createElement('i');
+        d.className = w[0];
+        d.title = w[1];
+        dots.appendChild(d);
+      });
+      dots.setAttribute('data-key', nextKey);
+    }
+    updateProxyPillTexts();
+  }
+
+  // 只更新节点名与速率文字
+  function updateProxyPillTexts() {
+    const pill = document.querySelector('#tb-rest .proxy-pill');
+    if (!pill) return;
+    const nodeEl = pill.querySelector('.proxy-pill-node');
+    const spdEl = pill.querySelector('.proxy-pill-speed');
+    if (nodeEl) {
+      const name = px.pillNode || '';
+      nodeEl.textContent = name ? '｜' + name : '';
+    }
+    if (spdEl) {
+      const s = pillTraffic.speed;
+      spdEl.textContent = '｜↑' + pxFmtBytes(s.up) + '/s ↓' + pxFmtBytes(s.down) + '/s';
+    }
+  }
+
+  // 每 2 秒轮询一次轻量状态（不依赖代理页是否打开）
+  async function pollProxyPill() {
+    if (!proxyApi || typeof proxyApi.liteStatus !== 'function') return;
+    const ps = px.state;
+    if (!ps || !ps.running) return;
+    let r = null;
+    try { r = await proxyApi.liteStatus(); } catch (_) { return; }
+    if (!r || !r.running) return;
+    const now = Date.now();
+    if (pillTraffic.t) {
+      const dt = Math.max(0.5, (now - pillTraffic.t) / 1000);
+      pillTraffic.speed = {
+        up: Math.max(0, (r.up - pillTraffic.up) / dt),
+        down: Math.max(0, (r.down - pillTraffic.down) / dt),
+      };
+    }
+    pillTraffic.t = now;
+    pillTraffic.up = r.up;
+    pillTraffic.down = r.down;
+    px.pillNode = r.currentNode || px.pillNode || '';
+    if (!document.querySelector('#tb-rest .proxy-pill')) {
+      const tb = $('tb-rest');
+      if (tb) paintProxyPill(tb);
+    } else {
+      updateProxyPillTexts();
+    }
+  }
+
+  function startProxyPillPoll() {
+    if (startProxyPillPoll._t) return;
+    startProxyPillPoll._t = setInterval(pollProxyPill, 2000);
   }
 
   // 保存休息配置：修改后立即写入主进程配置文件
@@ -564,6 +2994,172 @@
     }
   }
 
+  /* ------------------------------ 自动更新状态 ------------------------------ */
+
+  // 最近一次更新状态（主进程 update:state 推送）
+  let updateCached = { status: 'idle', message: '', percent: 0, latestVersion: '', currentVersion: '' };
+
+  // 合并更新状态，并同步「设置页更新状态行」与「标题栏更新提示图标」
+  function applyUpdateState(patch) {
+    updateCached = Object.assign({}, updateCached, patch || {});
+    paintUpdateRow();
+    paintUpdateBadge();
+  }
+
+  // 刷新通用页「更新状态」行（设置页未打开时静默）
+  function paintUpdateRow() {
+    const desc = $('st-update-desc');
+    const act = $('st-update-act');
+    if (!desc || !act) return;
+    const st = updateCached.status || 'idle';
+    desc.textContent = updateCached.message
+      || (st === 'idle' ? '尚未检查更新（开启右侧开关：每次启动自动检查更新）' : '');
+    if (st === 'downloaded') act.textContent = '重启安装';
+    else if (st === 'downloading') act.textContent = '下载中…';
+    else if (st === 'checking' || st === 'installing') act.textContent = '处理中…';
+    else act.textContent = '检查更新';
+    act.disabled = st === 'checking' || st === 'downloading' || st === 'installing';
+  }
+
+  // 标题栏「更新提示」图标：发现新版 / 下载中 / 已下载时显示，悬浮展示版本信息
+  function paintUpdateBadge() {
+    const wrap = $('tb-update');
+    if (!wrap) return;
+    const st = updateCached.status || 'idle';
+    const show = st === 'available' || st === 'downloading' || st === 'downloaded';
+    wrap.classList.toggle('hidden', !show);
+    if (!show) return;
+    wrap.dataset.state = st;
+    const title = $('update-tip-title');
+    const text = $('update-tip-desc');
+    const action = $('update-tip-action');
+    const v = updateCached.latestVersion ? ' v' + updateCached.latestVersion : '';
+    if (title) title.textContent = st === 'downloaded' ? '新版本已就绪' + v : '发现新版本' + v;
+    if (text) {
+      text.textContent = st === 'downloading'
+        ? '正在下载（优先增量）：' + (updateCached.percent || 0) + '%'
+        : st === 'downloaded'
+          ? '已下载完成，重启即可完成安装'
+          : '当前 v' + (updateCached.currentVersion || '') + ' → 最新 v' + (updateCached.latestVersion || '');
+    }
+    if (action) action.textContent = st === 'downloading' ? '下载中，请稍候' : '点击执行更新';
+    const btn = $('btn-update');
+    if (btn) btn.title = (title ? title.textContent : '更新') + '（点击执行更新）';
+  }
+
+  // 把更新错误文本转成用户可读、可操作的提示
+  function friendlyUpdateError(errText) {
+    const t = String(errText || '');
+    if (/ERR_CONNECTION|ERR_NETWORK|ERR_TIMED_OUT|ERR_INTERNET|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|network|proxy|aborted|timeout/i.test(t)) {
+      return 'GitHub 访问失败，建议重试或开启代理后再试';
+    }
+    if (/\b404\b|not found|no published versions|latest\.yml/i.test(t)) {
+      return '没有找到新版本（GitHub 暂无可用发布）';
+    }
+    return '更新失败：' + (t || '未知错误');
+  }
+
+  // 点击标题栏更新图标：未下载则下载，已下载则重启安装
+  async function onUpdateBadgeClick() {
+    const st = updateCached.status;
+    if (st === 'downloaded') {
+      const r = await updatesApi.install();
+      if (r && !r.ok) toast(r.error || '安装更新失败', 'err');
+      return;
+    }
+    if (st === 'available') {
+      applyUpdateState({ status: 'downloading', percent: 0, message: '正在下载更新（优先增量）…' });
+      const d = await updatesApi.download();
+      if (d && !d.ok) {
+        const msg = friendlyUpdateError(d.error);
+        applyUpdateState({ status: 'available', message: msg });
+        toast(msg, 'err');
+      }
+      return;
+    }
+    if (st === 'downloading') toast('正在下载更新，请稍候…', 'ok');
+  }
+
+  // 更新检查只负责「检查」，不自动下载；发现新版后由标题栏图标触发下载
+  // auto=true 为启动时静默检查（不弹提示，仅更新状态 / 显示标题栏图标）
+  async function runUpdateCheck(auto) {
+    const st = updateCached.status || 'idle';
+    if (st === 'checking' || st === 'downloading' || st === 'installing') return;
+    // 立即反馈，避免等待网络期间「点了没反应」
+    applyUpdateState({ status: 'checking', percent: 0, message: '正在检查更新…' });
+    let r;
+    try {
+      // 主进程请求可能较慢（GitHub 访问不畅），最多等 20 秒
+      r = await Promise.race([
+        updatesApi.check(),
+        new Promise((resolve) => setTimeout(() => resolve({ ok: false, errorKind: 'network', error: '检查超时' }), 20000)),
+      ]);
+    } catch (err) {
+      r = { ok: false, errorKind: 'other', error: String((err && err.message) || err) };
+    }
+
+    if (!r || !r.ok) {
+      // 按失败原因给出可操作的提示
+      const kind = r && r.errorKind;
+      const msg = kind === 'network'
+        ? 'GitHub 访问失败，建议重试或开启代理后再试'
+        : kind === 'notfound'
+          ? '没有找到新版本（GitHub 暂无可用发布）'
+          : '检查更新失败：' + ((r && r.error) || '未知错误');
+      applyUpdateState({ status: 'error', message: msg });
+      if (!auto) toast(msg, 'err');
+      return;
+    }
+
+    if (!r.available) {
+      const cur = r.currentVersion || '';
+      applyUpdateState({ status: 'idle', message: '没有找到新版本（当前已是最新 v' + cur + '）', latestVersion: r.latestVersion || '', currentVersion: cur, percent: 0 });
+      if (!auto) toast('没有找到新版本，当前已是最新 v' + cur, 'ok');
+      return;
+    }
+
+    // 发现新版本：只显示提示图标，等待用户「点击执行更新」
+    applyUpdateState({
+      status: 'available',
+      latestVersion: r.latestVersion,
+      currentVersion: r.currentVersion,
+      percent: 0,
+      message: '发现新版本 v' + r.latestVersion + '，点击标题栏更新图标执行更新',
+    });
+    if (!auto) toast('发现新版本 v' + r.latestVersion + '，点击右上角更新图标执行更新', 'ok');
+  }
+
+  // 通用设置：侧边栏导航配置（顺序 / 置顶置底 / 快捷键 / 显隐）
+  function sidebarNavHtml(s) {
+    // 与真实侧边栏保持同一顺序，配置行会跟随上下移动实时重排
+    const nav = sortSidebarNav(normalizeSidebarNav(s && s.sidebarNav));
+    const rows = nav.map((item) => {
+      const def = SIDEBAR_ITEMS.find((d) => d.id === item.id) || item;
+      const sc = item.shortcut || '未设置';
+      return [
+        '  <div class="set-row sb-nav-row" data-sid="' + item.id + '">',
+        '    <div class="set-label">' + def.name + '</div>',
+        '    <div class="set-inline sb-nav-ctrls">',
+        '      <button class="btn slim sb-up" data-sid="' + item.id + '" data-act="up" title="上移">↑</button>',
+        '      <button class="btn slim sb-down" data-sid="' + item.id + '" data-act="down" title="下移">↓</button>',
+        '      <select class="set-select sb-pos" data-sid="' + item.id + '" title="置顶 / 置底">',
+        '        <option value="top"' + (item.position === 'top' ? ' selected' : '') + '>置顶</option>',
+        '        <option value="bottom"' + (item.position === 'bottom' ? ' selected' : '') + '>置底</option>',
+        '      </select>',
+        '      <button class="btn sb-sc' + (ui.sidebarShortcutListening === item.id ? ' is-recording' : '') + '" data-sid="' + item.id + '" data-act="shortcut" title="点击后按下任意键设置快捷键；按 Backspace 清除">' + (ui.sidebarShortcutListening === item.id ? '按下按键…' : formatShortcut(sc)) + '</button>',
+        '      <button class="switch sb-vis' + (item.visible ? ' on' : '') + '" data-sid="' + item.id + '" data-act="visible" role="switch" title="在侧边栏显示 / 隐藏"></button>',
+        '    </div>',
+        '  </div>',
+      ].join('');
+    }).join('');
+    return [
+      '<div class="set-group" data-skey="sidebar-nav">',
+      '  <div class="set-group-title">侧边栏<span class="set-desc">调整各项的排列顺序、置顶 / 置底、显示与快捷键（F1 ~ F5）</span></div>',
+      rows,
+      '</div>',
+    ].join('');
+  }
+
   function generalTabHtml(s) {
     return [
       '<div class="set-group">',
@@ -575,11 +3171,19 @@
       '  </div>',
       '</div>',
       '<div class="set-group">',
+      '  <div class="set-group-title">启动</div>',
+      '  <div class="set-row" data-skey="autoLaunch">',
+      '    <div class="set-label">开机自动启动<span class="set-desc" id="st-auto-launch-desc">读取中…</span></div>',
+      '    <button class="switch" id="st-auto-launch" role="switch" title="登录 Windows 后自动启动工作台"></button>',
+      '  </div>',
+      '</div>',
+      '<div class="set-group">',
       '  <div class="set-group-title">布局</div>',
       '  <div class="set-row btns" data-skey="reset">',
       '    <button class="btn danger" id="st-reset">恢复默认布局</button>',
       '  </div>',
       '</div>',
+      sidebarNavHtml(s),
       '<div class="set-group">',
       '  <div class="set-group-title">外观</div>',
       '  <div class="set-row" data-skey="theme">',
@@ -593,6 +3197,16 @@
       '  <div class="set-row" data-skey="edgeSnap">',
       '    <div class="set-label">贴边自动收起<span class="set-desc">拖到屏幕上 / 左 / 右边缘自动隐藏，只留一条 4px 窄条；鼠标碰到窄条或窗口展开区域立即弹出（不支持下边）</span></div>',
       '    <button class="switch' + (s.edgeSnap ? ' on' : '') + '" id="st-edge-snap"></button>',
+      '  </div>',
+      '</div>',
+      '<div class="set-group">',
+      '  <div class="set-group-title">更新</div>',
+      '  <div class="set-row" data-skey="update">',
+      '    <div class="set-label">更新状态<span class="set-desc" id="st-update-desc">尚未检查更新（开启右侧开关：每次启动自动检查更新）</span></div>',
+      '    <div class="set-inline">',
+      '      <button class="switch' + (s.autoUpdate ? ' on' : '') + '" id="st-auto-update" role="switch" title="开启后每次启动工作台自动检查更新，发现新版本时在标题栏显示提示图标"></button>',
+      '      <button class="btn" id="st-update-act">检查更新</button>',
+      '    </div>',
       '  </div>',
       '</div>',
       '<div class="set-group" data-skey="about">',
@@ -677,6 +3291,8 @@
   const SETTINGS_INDEX = [
     { id: 'import', tab: 'general', name: '导入配置 / 导出配置 / 打开数据目录', desc: '数据备份、迁移与数据文件位置' },
     { id: 'reset', tab: 'general', name: '恢复默认布局', desc: '清空当前布局，回到初始三行三列' },
+    { id: 'sidebar-nav', tab: 'general', name: '侧边栏', desc: '调整各项的排列顺序、置顶 / 置底、显示与快捷键（F1 ~ F5）' },
+    { id: 'update', tab: 'general', name: '更新状态 / 自动检查更新', desc: '开启开关后每次启动自动检查；也可手动检查新版本或重启安装已下载的更新' },
     { id: 'about', tab: 'general', name: '关于', desc: '应用图标、作者、版本号、开源地址' },
     { id: 'rest-enabled', tab: 'rest', name: '电脑休息提醒（总开关）', desc: '关闭后不检测、不提醒' },
     { id: 'rest-free', tab: 'rest', name: '空闲判断时间', desc: '无鼠标键盘操作达到该时长后重置计时，单位分钟' },
@@ -697,8 +3313,20 @@
     { id: 'sc-undo', tab: 'shortcut', name: '快捷键：撤销', desc: '撤销上一步操作' },
     { id: 'sc-confirm', tab: 'shortcut', name: '快捷键：确认弹窗', desc: '确认当前弹窗的主按钮（系统固定）' },
     { id: 'sc-cancel', tab: 'shortcut', name: '快捷键：关闭 / 取消', desc: '关闭弹窗、菜单、搜索或退出设置（系统固定）' },
+    { id: 'br-enabled', tab: 'browser', name: '启用内嵌浏览器', desc: '总开关；关闭后侧边栏隐藏「浏览器」入口' },
+    { id: 'br-open-links', tab: 'browser', name: '网址快捷方式在内嵌浏览器打开', desc: '点击 http(s) 网址图标时默认在内嵌浏览器打开；关闭则调用系统默认浏览器' },
+    { id: 'br-theme', tab: 'browser', name: '浏览器主题', desc: '浏览器工具栏外观：浅色 / 深色 / 系统默认值（跟随工作台主题）' },
+    { id: 'br-startup', tab: 'browser', name: '启动时打开', desc: '打开浏览器时的初始页面：新标签页 / 上次页面 / 自定义网址' },
+    { id: 'br-startup-url', tab: 'browser', name: '启动网址', desc: '启动方式为「自定义网址」时打开的网址' },
+    { id: 'br-home-button', tab: 'browser', name: '显示主页按钮', desc: '在浏览器工具栏显示「主页」按钮' },
+    { id: 'br-home-action', tab: 'browser', name: '主页按钮行为', desc: '点击主页按钮时跳转：新标签页 / 自定义网址' },
+    { id: 'br-home-url', tab: 'browser', name: '主页网址', desc: '主页按钮行为为「自定义网址」时跳转的网址' },
+    { id: 'br-newtab', tab: 'browser', name: '新建标签页打开', desc: '新标签页默认加载：首页 / 自定义网址 / 空白页' },
+    { id: 'br-newtab-url', tab: 'browser', name: '新标签页网址', desc: '新标签页为「自定义网址」时加载的网址' },
+    { id: 'tg-enabled', tab: 'telegram', name: '自动保存媒体文件', desc: '内嵌 Telegram 网页版浏览媒体时自动静默保存到本地文件夹' },
+    { id: 'tg-path', tab: 'telegram', name: '媒体保存路径', desc: '自动保存的媒体文件存放位置；留空则使用系统下载目录下的 Telegram 子文件夹' },
   ];
-  const SETTINGS_TAB_NAME = { general: '通用', rest: '休息', app: '应用', shortcut: '快捷键' };
+  const SETTINGS_TAB_NAME = { general: '通用', rest: '休息', app: '应用', shortcut: '快捷键', browser: '浏览器', telegram: 'Telegram' };
 
   // 复用全局搜索的 matchItem：名称 + 描述合并匹配（包含 / 全拼 / 首拼 / 英文首字母 / 子序列模糊）
   function matchSetting(entry, q, compact) {
@@ -710,9 +3338,8 @@
     const entry = SETTINGS_INDEX.find((it) => it.id === id);
     if (!entry) return;
     ui.settingsQuery = '';
-    ui.settingsSearchOpen = false;
     ui.settingsTab = entry.tab;
-    render();
+    updateSettingsPage();
     requestAnimationFrame(() => {
       const row = el.grid.querySelector('[data-skey="' + id + '"]');
       if (!row) return;
@@ -816,49 +3443,185 @@
     ].join('');
   }
 
-  // 设置页：三大页（通用 / 休息 / 应用 / 快捷键），渲染进宫格区域
+  // 浏览器设置页：总开关 / 启动时 / 首页按钮 / 新建标签页
+  function browserTabHtml(b) {
+    const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const segBtn = (val, label, cur) => '<button data-v="' + val + '"' + (cur === val ? ' class="on"' : '') + '>' + label + '</button>';
+    return [
+      '<div class="set-group">',
+      '  <div class="set-group-title">内嵌浏览器</div>',
+      '  <div class="set-row" data-skey="br-enabled">',
+      '    <div class="set-label">启用内嵌浏览器<span class="set-desc">关闭后侧边栏将隐藏「浏览器」入口，已打开的浏览器视图会被关闭</span></div>',
+      '    <button class="switch' + (b.enabled ? ' on' : '') + '" id="st-br-enabled" role="switch" title="开启 / 关闭内嵌浏览器"></button>',
+      '  </div>',
+      '  <div class="set-row" data-skey="br-open-links">',
+      '    <div class="set-label">网址快捷方式在内嵌浏览器打开<span class="set-desc">点击 http(s) 网址图标时，默认在内嵌浏览器打开；关闭则调用系统默认浏览器</span></div>',
+      '    <button class="switch' + (b.openLinksInApp ? ' on' : '') + '" id="st-br-open-links" role="switch" title="开启 / 关闭内嵌浏览器打开网址"></button>',
+      '  </div>',
+      '</div>',
+      '<div class="set-group">',
+      '  <div class="set-group-title">外观</div>',
+      '  <div class="set-row" data-skey="br-theme">',
+      '    <div class="set-label">浏览器主题<span class="set-desc">控制浏览器工具栏的深浅色外观；「系统默认值」跟随工作台主题</span></div>',
+      '    <div class="seg" id="st-br-theme">',
+      segBtn('light', '浅色', b.theme),
+      segBtn('dark', '深色', b.theme),
+      segBtn('system', '系统默认值', b.theme),
+      '    </div>',
+      '  </div>',
+      '</div>',
+      '<div class="set-group">',
+      '  <div class="set-group-title">启动时</div>',
+      '  <div class="set-row" data-skey="br-startup">',
+      '    <div class="set-label">打开浏览器时<span class="set-desc">点击侧边栏「浏览器」进入时的初始页面</span></div>',
+      '    <div class="seg" id="st-br-startup">',
+      segBtn('newtab', '新标签页', b.startup),
+      segBtn('continue', '上次页面', b.startup),
+      segBtn('custom', '自定义网址', b.startup),
+      '    </div>',
+      '  </div>',
+      '  <div class="set-row' + (b.startup === 'custom' ? '' : ' hidden') + '" data-skey="br-startup-url" id="st-br-startup-url-row">',
+      '    <div class="set-label">启动网址<span class="set-desc">例如 https://www.baidu.com</span></div>',
+      '    <input class="input" id="st-br-startup-url" type="text" value="' + esc(b.startupUrl) + '" spellcheck="false" autocomplete="off" placeholder="https://...">',
+      '  </div>',
+      '</div>',
+      '<div class="set-group">',
+      '  <div class="set-group-title">首页按钮</div>',
+      '  <div class="set-row" data-skey="br-home-button">',
+      '    <div class="set-label">显示主页按钮<span class="set-desc">在浏览器工具栏显示「主页」按钮</span></div>',
+      '    <button class="switch' + (b.homeButton ? ' on' : '') + '" id="st-br-home-button" role="switch" title="显示 / 隐藏主页按钮"></button>',
+      '  </div>',
+      '  <div class="set-row" data-skey="br-home-action">',
+      '    <div class="set-label">主页按钮打开<span class="set-desc">点击主页按钮时跳转的页面</span></div>',
+      '    <div class="seg" id="st-br-home-action">',
+      segBtn('newtab', '新标签页', b.homeAction),
+      segBtn('custom', '自定义网址', b.homeAction),
+      '    </div>',
+      '  </div>',
+      '  <div class="set-row' + (b.homeAction === 'custom' ? '' : ' hidden') + '" data-skey="br-home-url" id="st-br-home-url-row">',
+      '    <div class="set-label">主页网址<span class="set-desc">例如 https://cn.bing.com</span></div>',
+      '    <input class="input" id="st-br-home-url" type="text" value="' + esc(b.homeUrl) + '" spellcheck="false" autocomplete="off" placeholder="https://...">',
+      '  </div>',
+      '</div>',
+      '<div class="set-group">',
+      '  <div class="set-group-title">新建标签页</div>',
+      '  <div class="set-row" data-skey="br-newtab">',
+      '    <div class="set-label">新标签页打开<span class="set-desc">新建标签页时默认加载的页面</span></div>',
+      '    <div class="seg" id="st-br-newtab">',
+      segBtn('homepage', '首页', b.newTab),
+      segBtn('custom', '自定义网址', b.newTab),
+      segBtn('blank', '空白页', b.newTab),
+      '    </div>',
+      '  </div>',
+      '  <div class="set-row' + (b.newTab === 'custom' ? '' : ' hidden') + '" data-skey="br-newtab-url" id="st-br-newtab-url-row">',
+      '    <div class="set-label">新标签页网址<span class="set-desc">例如 https://www.baidu.com</span></div>',
+      '    <input class="input" id="st-br-newtab-url" type="text" value="' + esc(b.newTabUrl) + '" spellcheck="false" autocomplete="off" placeholder="https://...">',
+      '  </div>',
+      '</div>',
+    ].join('');
+  }
+
+  // 设置页：Telegram 页面
+  function telegramTabHtml(t) {
+    const esc = (v) => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const p = trim(t.saveMediaPath);
+    const pathHint = p ? p : '（未设置：使用系统下载目录下的 Telegram 子文件夹）';
+    return [
+      '<div class="set-group">',
+      '  <div class="set-group-title">媒体自动保存</div>',
+      '  <div class="set-row" data-skey="tg-enabled">',
+      '    <div class="set-label">自动保存媒体文件<span class="set-desc">浏览内嵌 Telegram 网页版时，图片、视频、语音等媒体自动静默保存到本地，不弹任何对话框；关闭后不再保存</span></div>',
+      '    <button class="switch' + (t.enabled ? ' on' : '') + '" id="st-tg-enabled" role="switch" title="开启 / 关闭 Telegram 媒体自动保存"></button>',
+      '  </div>',
+      '  <div class="set-row set-row-col" data-skey="tg-path">',
+      '    <div class="set-label">媒体保存路径<span class="set-desc">留空则使用系统默认下载目录 + Telegram 子文件夹；也可指定自定义绝对路径，如 D:\\Telegram\\Media</span></div>',
+      '    <div class="st-path-row">',
+      '      <input class="input st-path-input" id="st-tg-path" type="text" value="' + esc(p) + '" spellcheck="false" autocomplete="off" placeholder="留空使用默认下载目录">',
+      '      <button class="btn" id="st-tg-path-pick" type="button">选择…</button>',
+      '      <button class="btn" id="st-tg-path-reset" type="button" title="恢复默认（系统下载目录\\Telegram）">默认</button>',
+      '    </div>',
+      '    <div class="set-subhint" id="st-tg-path-hint">当前保存位置：' + esc(pathHint) + '</div>',
+      '  </div>',
+      '</div>',
+      '<div class="set-group">',
+      '  <div class="set-group-title set-collapsible" id="st-tg-help-toggle">使用说明 <span class="set-caret">▼</span></div>',
+      '  <div class="set-collapsible-body" id="st-tg-help-body" style="display:none">',
+      '    <div class="set-desc-big">',
+      '      • 自动保存会在打开内嵌 Telegram 网页版后生效，走你当前开启的代理模式（自身代理 / 系统代理 / TUN）<br>',
+      '      • 媒体按 频道 / 群 / 对话 自动分文件夹存放，重名自动加序号，格式保留原始扩展名（jpg / mp4 / ogg 等）<br>',
+      '      • 仅对新加载的媒体生效；已缓存的历史内容不会自动追溯落盘<br>',
+      '      • 视频如果是流式播放（MSE）无法整体拦截，只有完整加载的视频能保存<br>',
+      '      • 右键侧栏 Telegram 入口可「刷新」或「重启」webview，页面卡住时使用',
+      '    </div>',
+      '  </div>',
+      '</div>',
+    ].join('');
+  }
+
+  // 设置页：四大页（通用 / 休息 / 应用 / 快捷键 / 浏览器 / Telegram），渲染进宫格区域
   function renderSettingsPage() {
     stopRestStatusTimer();
     if (!restConfig || typeof restConfig !== 'object') restConfig = Object.assign({}, REST_FALLBACK);
 
     const s = state.settings;
     const tab = ui.settingsTab || 'general';
-    const tabs = [['general', '通用'], ['rest', '休息'], ['app', '应用'], ['shortcut', '快捷键']];
+    const tabs = [
+      ['general', '通用', '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M2.2 4.2h5.6M11.2 4.2h2.6M2.2 11.8h2.6M8.2 11.8h5.6"/><circle cx="9.4" cy="4.2" r="1.5"/><circle cx="6.4" cy="11.8" r="1.5"/></svg>'],
+      ['shortcut', '快捷键', '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><rect x="1.8" y="4" width="12.4" height="8" rx="1.6"/><path d="M4.4 6.6h.1M7 6.6h.1M9.6 6.6h.1M12.2 6.6h.1M4.4 9.2h.1M6.4 9.2h3.2"/></svg>'],
+      ['rest', '休息', '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.6V8l2.4 1.6"/></svg>'],
+      ['app', '应用', '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2.6" y="2.6" width="4.6" height="4.6" rx="1.2"/><rect x="8.8" y="2.6" width="4.6" height="4.6" rx="1.2"/><rect x="2.6" y="8.8" width="4.6" height="4.6" rx="1.2"/><rect x="8.8" y="8.8" width="4.6" height="4.6" rx="1.2"/></svg>'],
+      ['proxy', '代理', '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.2c-2.6 0-4.7 2-4.9 4.5A3 3 0 0 0 4.2 12.4h7.6a2.8 2.8 0 0 0 .6-5.5A4.7 4.7 0 0 0 8 2.2z"/><path d="M5.6 9.4h4.8M8.4 7.7l2 1.7-2 1.7"/></svg>'],
+      ['browser', '浏览器', '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><circle cx="8" cy="8" r="5.6"/><path d="M2.6 8h10.8M8 2.4c1.6 1.6 2.4 3.5 2.4 5.6s-.8 4-2.4 5.6c-1.6-1.6-2.4-3.5-2.4-5.6s.8-4 2.4-5.6z"/></svg>'],
+      ['telegram', 'Telegram', '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 8.4c3.6-2.4 6.2-3.6 7.8-3.6s2.4.6 2 2.4c-.4 1.8-2 5.4-3.8 5.6s-2-1.4-3.2-2.6c-1-1-1.6-1-2.8-.6-.6.2-1-.4-1-1.2z"/><path d="M6 9l4-3"/></svg>'],
+    ];
 
     el.grid.style.display = 'block';
     el.grid.innerHTML = [
       '<div class="settings-page">',
-      '  <div class="settings-bar">',
-      '    <div class="set-tabs" id="st-tabs">',
-      tabs.map(([key, name]) => '      <button data-tab="' + key + '"' + (tab === key ? ' class="on"' : '') + '>' + name + '</button>').join(''),
+      '  <aside class="settings-nav">',
+      '    <button class="settings-back" id="st-back">← 返回应用</button>',
+      '    <div class="search tb-search st-search-wrap" id="st-search-wrap">',
+      '      <svg viewBox="0 0 16 16" width="14" height="14" class="search-ico"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.6 10.6l3.2 3.2" stroke="currentColor" stroke-width="1.3"/></svg>',
+      '      <input class="st-search" id="st-search" type="text" placeholder="搜索设置项" autocomplete="off" spellcheck="false">',
       '    </div>',
-      '    <div class="page-tools">',
-      '      <button class="tb-btn slim' + (ui.settingsSearchOpen ? ' hidden' : '') + '" id="st-search-btn" title="搜索设置项">',
-      '        <svg viewBox="0 0 16 16" width="14" height="14"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.6 10.6l3.2 3.2" stroke="currentColor" stroke-width="1.3"/></svg>',
-      '      </button>',
-      '      <div class="search tb-search st-search-wrap' + (ui.settingsSearchOpen ? '' : ' hidden') + '" id="st-search-wrap">',
-      '        <svg viewBox="0 0 16 16" width="14" height="14" class="search-ico"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.6 10.6l3.2 3.2" stroke="currentColor" stroke-width="1.3"/></svg>',
-      '        <input class="st-search" id="st-search" type="text" placeholder="搜索设置项…" autocomplete="off" spellcheck="false">',
-      '        <span class="kbd">esc</span>',
-      '      </div>',
+      '    <nav class="set-tabs" id="st-tabs">',
+      tabs.map(([key, name, ico]) => '      <button data-tab="' + key + '"' + (tab === key ? ' class="on"' : '') + '>' + ico + '<span>' + name + '</span></button>').join(''),
+      '    </nav>',
+      '  </aside>',
+      '  <section class="settings-main">',
+      '    <div class="settings-title">' + (tabs.find((t) => t[0] === tab) || tabs[0])[1] + '</div>',
+      '    <div class="settings-search-results" id="st-sres" style="display:none"></div>',
+      '    <div class="settings-body" id="st-body">',
+      tab === 'rest' ? restTabHtml() : tab === 'app' ? appTabHtml(s) : tab === 'shortcut' ? shortcutTabHtml() : tab === 'browser' ? browserTabHtml(s.browser || {}) : tab === 'telegram' ? telegramTabHtml(telegramConfig()) : generalTabHtml(s),
       '    </div>',
-      '  </div>',
-      '  <div class="settings-search-results" id="st-sres" style="display:none"></div>',
-      '  <div class="settings-body" id="st-body">',
-      tab === 'rest' ? restTabHtml() : tab === 'app' ? appTabHtml(s) : tab === 'shortcut' ? shortcutTabHtml() : generalTabHtml(s),
-      '  </div>',
+      '  </section>',
       '</div>',
     ].join('');
 
     const q = (sel) => el.grid.querySelector(sel);
 
+    // 左上角「返回应用」：退出设置页回到宫格
+    const backBtn = q('#st-back');
+    if (backBtn) {
+      backBtn.addEventListener('click', () => {
+        ui.settingsOpen = false;
+        ui.settingsQuery = '';
+        render();
+      });
+    }
+
     q('#st-tabs').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-tab]');
-      if (!b || b.dataset.tab === ui.settingsTab) return;
+      if (!b) return;
+      // 「代理」作为独立视图：点击后直接进入代理管理页，不复用设置页内容区
+      if (b.dataset.tab === 'proxy') {
+        openProxy();
+        return;
+      }
+      if (b.dataset.tab === ui.settingsTab) return;
       ui.settingsTab = b.dataset.tab;
       ui.settingsQuery = ''; // 手动切页签时退出搜索
-      ui.settingsSearchOpen = false;
-      render();
+      updateSettingsPage();
       if (el.canvas) el.canvas.scrollTop = 0;
     });
 
@@ -889,24 +3652,7 @@
     };
 
     const stSearch = q('#st-search');
-    const stWrap = q('#st-search-wrap');
-    const stBtn = q('#st-search-btn');
     stSearch.value = ui.settingsQuery || '';
-
-    // 搜索图标点击展开输入框（与快速启动的搜索同款）；Esc 收起，有内容时先清空
-    const setSearchOpen = (open, focus) => {
-      ui.settingsSearchOpen = !!open;
-      if (stWrap) stWrap.classList.toggle('hidden', !open);
-      if (stBtn) stBtn.classList.toggle('hidden', !!open);
-      if (open) {
-        if (focus) setTimeout(() => stSearch.focus(), 20);
-      } else {
-        stSearch.value = '';
-        ui.settingsQuery = '';
-        paintSettingsSearch();
-      }
-    };
-    if (stBtn) stBtn.addEventListener('click', () => setSearchOpen(true, true));
 
     stSearch.addEventListener('input', () => {
       ui.settingsQuery = stSearch.value;
@@ -918,14 +3664,14 @@
         const first = el.grid.querySelector('#st-sres .st-hit');
         if (first) jumpToSetting(first.dataset.sid);
       } else if (e.key === 'Escape') {
-        // 不冒泡触发「关闭设置页」：有内容先清空，否则收起搜索框
+        // 不冒泡触发「关闭设置页」：有内容先清空，否则仅移出焦点
         e.stopPropagation();
         if (stSearch.value) {
           stSearch.value = '';
           ui.settingsQuery = '';
           paintSettingsSearch();
         } else {
-          setSearchOpen(false);
+          stSearch.blur();
         }
       }
     });
@@ -934,6 +3680,14 @@
       if (row) jumpToSetting(row.dataset.sid);
     });
     if (ui.settingsQuery) paintSettingsSearch();
+
+    bindSettingsBodyEvents();
+  }
+
+  // 设置页右侧内容的控件事件：每次重建 #st-body 后都要重新绑定
+  function bindSettingsBodyEvents() {
+    const q = (sel) => el.grid.querySelector(sel);
+    const tab = ui.settingsTab || 'general';
 
     /* -------------------------------- 通用页 -------------------------------- */
 
@@ -985,12 +3739,57 @@
       });
     }
 
-    // 关于区块：开源地址点击走系统浏览器；版本号从主进程取
+    /* ------------------------------ 侧边栏配置 ------------------------------ */
+    // 上移 / 下移：与配置列表中相邻项交换槽位（跨置顶/置底分组时连同分组一起交换），
+    // 保证「设置里的行位置」和「真实侧栏按钮位置」始终一致
+    function moveSidebarItem(id, dir) {
+      const nav = getSidebarNav();
+      const ordered = sortSidebarNav(nav);
+      const idx = ordered.findIndex((n) => n.id === id);
+      if (idx < 0) return;
+      const target = ordered[idx + dir];
+      if (!target) return; // 已到列表顶端 / 底端
+      const cur = ordered[idx];
+      // 交换两项的「位置 + 顺序」槽位
+      const pos = cur.position; cur.position = target.position; target.position = pos;
+      const ord = cur.order; cur.order = target.order; target.order = ord;
+      state.settings.sidebarNav = nav;
+      scheduleSave();
+      renderSidebar();
+      updateSettingsPage();
+    }
+    el.grid.querySelectorAll('.sb-nav-row').forEach((row) => {
+      const id = row.dataset.sid;
+      const up = row.querySelector('.sb-up');
+      const down = row.querySelector('.sb-down');
+      const pos = row.querySelector('.sb-pos');
+      const sc = row.querySelector('.sb-sc');
+      const vis = row.querySelector('.sb-vis');
+      if (up) up.addEventListener('click', () => moveSidebarItem(id, -1));
+      if (down) down.addEventListener('click', () => moveSidebarItem(id, 1));
+      if (pos) pos.addEventListener('change', () => {
+        const nav = getSidebarNav();
+        const item = nav.find((n) => n.id === id);
+        if (item) { item.position = pos.value; state.settings.sidebarNav = nav; scheduleSave(); renderSidebar(); updateSettingsPage(); }
+      });
+      if (sc) sc.addEventListener('click', () => {
+        ui.sidebarShortcutListening = ui.sidebarShortcutListening === id ? null : id;
+        ui.shortcutListening = null; // 互斥：不同时录制应用快捷键
+        updateSettingsPage();
+      });
+      if (vis) vis.addEventListener('click', () => {
+        const nav = getSidebarNav();
+        const item = nav.find((n) => n.id === id);
+        if (item) { item.visible = !item.visible; state.settings.sidebarNav = nav; scheduleSave(); renderSidebar(); updateSettingsPage(); }
+      });
+    });
+
+    // 关于区块：开源地址点击弹出选择（内置浏览器 / 外部浏览器）
     const aboutLink = q('#st-about-link');
     if (aboutLink) {
       aboutLink.addEventListener('click', (e) => {
         e.preventDefault();
-        api.launch({ target: REPO_URL });
+        openAboutLinkDialog(REPO_URL);
       });
     }
     const aboutVer = q('#st-about-ver');
@@ -1018,6 +3817,40 @@
       });
     }
 
+    // 开机自动启动：以主进程真实状态为准（普通=Run 项；管理员启动=计划任务）
+    const alSw = q('#st-auto-launch');
+    const alDesc = q('#st-auto-launch-desc');
+    const paintAutoLaunch = (r) => {
+      if (!r) return;
+      alSw.classList.toggle('on', !!r.enabled);
+      if (!alDesc) return;
+      if (r.mechanism === 'task') {
+        alDesc.textContent = '已通过「计划任务」在登录时启动（当前程序以管理员身份运行，Windows 会忽略普通的启动项）';
+      } else if (r.mechanism === 'run') {
+        alDesc.textContent = '已写入 Windows 启动项（HKCU\\Run）';
+      } else if (r.elevated) {
+        alDesc.textContent = '当前程序以管理员身份运行，普通启动项会被 Windows 忽略；开启后自动改用「计划任务」方式';
+      } else {
+        alDesc.textContent = '关闭状态：登录 Windows 后不会自动启动';
+      }
+    };
+    if (alSw) {
+      api.getAutoLaunch().then(paintAutoLaunch).catch(() => {});
+      alSw.addEventListener('click', async () => {
+        const next = !alSw.classList.contains('on');
+        alSw.classList.toggle('on', next);
+        let r = null;
+        try { r = await api.setAutoLaunch(next); } catch (_) {}
+        if (!r || !r.ok) {
+          alSw.classList.toggle('on', !next);
+          toast((r && r.error) || '设置开机自启失败', 'err');
+          return;
+        }
+        paintAutoLaunch(r);
+        toast(r.enabled ? '已开启开机自动启动' : '已关闭开机自动启动', 'ok');
+      });
+    }
+
     // 贴边自动收起开关：立即通知主进程启用 / 停用
     const esSnap = q('#st-edge-snap');
     if (esSnap) {
@@ -1030,6 +3863,39 @@
         if (api.edgeSnap) api.edgeSnap.set(next).catch(() => {});
       });
     }
+
+    // 自动更新开关：默认关闭；开启时立即检查一次
+    const autoUpSw = q('#st-auto-update');
+    if (autoUpSw) {
+      autoUpSw.addEventListener('click', () => {
+        const next = !autoUpSw.classList.contains('on');
+        pushHistory();
+        state.settings.autoUpdate = next;
+        autoUpSw.classList.toggle('on', next);
+        scheduleSave();
+        toast(next ? '已开启自动更新' : '已关闭自动更新', 'ok');
+        if (next) runUpdateCheck(false);
+      });
+    }
+
+    // 更新状态行：已下载 → 重启安装；已发现新版 → 开始下载；否则检查更新
+    const updateAct = q('#st-update-act');
+    if (updateAct) {
+      updateAct.addEventListener('click', async () => {
+        if (updateCached.status === 'downloaded') {
+          const r = await updatesApi.install();
+          if (r && !r.ok) toast(r.error || '安装更新失败', 'err');
+          return;
+        }
+        if (updateCached.status === 'available') {
+          onUpdateBadgeClick();
+          return;
+        }
+        runUpdateCheck(false);
+      });
+    }
+    paintUpdateRow();
+    paintUpdateBadge();
 
     /* -------------------------------- 应用页 -------------------------------- */
 
@@ -1195,6 +4061,186 @@
       });
     });
 
+    /* -------------------------------- 浏览器页 -------------------------------- */
+
+    // 总开关：关闭时隐藏侧边栏入口并关闭已打开的浏览器视图
+    const brEnabledBtn = q('#st-br-enabled');
+    if (brEnabledBtn) {
+      brEnabledBtn.addEventListener('click', () => {
+        const next = !brEnabledBtn.classList.contains('on');
+        pushHistory();
+        state.settings.browser.enabled = next;
+        brEnabledBtn.classList.toggle('on', next);
+        scheduleSave();
+        // 立即同步侧边栏「浏览器」按钮显隐
+        const sb = $('btn-browser');
+        if (sb) sb.classList.toggle('hidden', !next);
+        if (!next && ui.browserOpen) closeBrowser();
+        toast(next ? '已启用内嵌浏览器' : '已关闭内嵌浏览器', 'ok');
+      });
+    }
+
+    // 网址快捷方式：是否默认在内嵌浏览器打开
+    const openLinksBtn = q('#st-br-open-links');
+    if (openLinksBtn) {
+      openLinksBtn.addEventListener('click', () => {
+        const next = !openLinksBtn.classList.contains('on');
+        pushHistory();
+        state.settings.browser.openLinksInApp = next;
+        openLinksBtn.classList.toggle('on', next);
+        scheduleSave();
+        toast(next ? '网址将在内嵌浏览器中打开' : '网址将用系统默认浏览器打开', 'ok');
+      });
+    }
+
+    // 分段选择器通用绑定：写入字段 + 切换自定义网址输入行显隐
+    const bindBrowserSeg = (segId, field, rowId) => {
+      const seg = q('#' + segId);
+      if (!seg) return;
+      seg.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-v]');
+        if (!btn || btn.classList.contains('on')) return;
+        pushHistory();
+        state.settings.browser[field] = btn.dataset.v;
+        Array.from(seg.querySelectorAll('button[data-v]')).forEach((x) => {
+          x.classList.toggle('on', x === btn);
+        });
+        // 联动对应自定义网址行的显隐
+        if (rowId) {
+          const row = q('#' + rowId);
+          if (row) row.classList.toggle('hidden', btn.dataset.v !== 'custom');
+        }
+        // 主题切换立即生效
+        if (field === 'theme') applyBrowserTheme();
+        scheduleSave();
+      });
+    };
+    bindBrowserSeg('st-br-startup', 'startup', 'st-br-startup-url-row');
+    bindBrowserSeg('st-br-home-action', 'homeAction', 'st-br-home-url-row');
+    bindBrowserSeg('st-br-newtab', 'newTab', 'st-br-newtab-url-row');
+    bindBrowserSeg('st-br-theme', 'theme', null);
+
+    // 自定义网址输入框：防抖保存
+    const bindBrowserUrl = (inputId, field) => {
+      const inp = q('#' + inputId);
+      if (!inp) return;
+      let t = null;
+      inp.addEventListener('input', () => {
+        clearTimeout(t);
+        t = setTimeout(() => {
+          state.settings.browser[field] = trim(inp.value);
+          scheduleSave();
+        }, 400);
+      });
+      inp.addEventListener('change', () => {
+        clearTimeout(t);
+        state.settings.browser[field] = trim(inp.value);
+        scheduleSave();
+      });
+    };
+    bindBrowserUrl('st-br-startup-url', 'startupUrl');
+    bindBrowserUrl('st-br-home-url', 'homeUrl');
+    bindBrowserUrl('st-br-newtab-url', 'newTabUrl');
+
+    // 主页按钮显示开关：同步工具栏主页按钮显隐
+    const homeBtnSw = q('#st-br-home-button');
+    if (homeBtnSw) {
+      homeBtnSw.addEventListener('click', () => {
+        const next = !homeBtnSw.classList.contains('on');
+        pushHistory();
+        state.settings.browser.homeButton = next;
+        homeBtnSw.classList.toggle('on', next);
+        scheduleSave();
+        const hb = $('br-home');
+        if (hb) hb.classList.toggle('hidden', !next);
+        toast(next ? '已显示主页按钮' : '已隐藏主页按钮', 'ok');
+      });
+    }
+
+    /* -------------------------------- Telegram 页 -------------------------------- */
+
+    // 自动保存开关
+    const tgEnabledBtn = q('#st-tg-enabled');
+    if (tgEnabledBtn) {
+      tgEnabledBtn.addEventListener('click', () => {
+        const next = !tgEnabledBtn.classList.contains('on');
+        pushHistory();
+        state.settings.telegram.enabled = next;
+        tgEnabledBtn.classList.toggle('on', next);
+        scheduleSave();
+        toast(next ? '已开启 Telegram 媒体自动保存' : '已关闭 Telegram 媒体自动保存', 'ok');
+      });
+    }
+
+    // 保存路径输入框：防抖保存
+    const tgPathInp = q('#st-tg-path');
+    const tgPathHint = q('#st-tg-path-hint');
+    if (tgPathInp) {
+      const updateHint = () => {
+        const v = trim(tgPathInp.value);
+        if (tgPathHint) tgPathHint.textContent = '当前保存位置：' + (v ? v : '（未设置：使用系统下载目录下的 Telegram 子文件夹）');
+      };
+      let t = null;
+      tgPathInp.addEventListener('input', () => {
+        clearTimeout(t);
+        t = setTimeout(() => {
+          state.settings.telegram.saveMediaPath = trim(tgPathInp.value);
+          scheduleSave();
+          updateHint();
+        }, 400);
+        updateHint();
+      });
+      tgPathInp.addEventListener('change', () => {
+        clearTimeout(t);
+        state.settings.telegram.saveMediaPath = trim(tgPathInp.value);
+        scheduleSave();
+        updateHint();
+      });
+      updateHint();
+    }
+
+    // 选择文件夹
+    const tgPathPick = q('#st-tg-path-pick');
+    if (tgPathPick) {
+      tgPathPick.addEventListener('click', async () => {
+        if (!isElectron) { toast('浏览器预览模式下无法选择文件夹', 'err'); return; }
+        const res = await api.pick({ directory: true, title: '选择 Telegram 媒体保存文件夹' });
+        if (res && res.ok && res.path) {
+          pushHistory();
+          state.settings.telegram.saveMediaPath = res.path;
+          scheduleSave();
+          if (tgPathInp) { tgPathInp.value = res.path; }
+          if (tgPathHint) tgPathHint.textContent = '当前保存位置：' + res.path;
+          toast('已设置保存路径', 'ok');
+        }
+      });
+    }
+
+    // 恢复默认
+    const tgPathReset = q('#st-tg-path-reset');
+    if (tgPathReset) {
+      tgPathReset.addEventListener('click', () => {
+        pushHistory();
+        state.settings.telegram.saveMediaPath = '';
+        scheduleSave();
+        if (tgPathInp) { tgPathInp.value = ''; tgPathInp.focus(); }
+        if (tgPathHint) tgPathHint.textContent = '当前保存位置：（未设置：使用系统下载目录下的 Telegram 子文件夹）';
+        toast('已恢复默认保存路径', 'ok');
+      });
+    }
+
+    // 使用说明折叠/展开
+    const tgHelpToggle = q('#st-tg-help-toggle');
+    const tgHelpBody = q('#st-tg-help-body');
+    if (tgHelpToggle && tgHelpBody) {
+      tgHelpToggle.addEventListener('click', () => {
+        const open = tgHelpBody.style.display !== 'none';
+        tgHelpBody.style.display = open ? 'none' : 'block';
+        const caret = tgHelpToggle.querySelector('.set-caret');
+        if (caret) caret.textContent = open ? '▼' : '▲';
+      });
+    }
+
     /* -------------------------------- 休息页 -------------------------------- */
 
     if (tab !== 'rest') return;
@@ -1288,6 +4334,30 @@
         fitPw();
       });
     }
+  }
+
+  // 仅刷新标题、选中态与右侧内容：保留左侧导航与搜索框 DOM，避免整页重建造成搜索框闪动
+  function updateSettingsPage() {
+    stopRestStatusTimer();
+    if (!restConfig || typeof restConfig !== 'object') restConfig = Object.assign({}, REST_FALLBACK);
+    const page = el.grid.querySelector('.settings-page');
+    if (!page) { renderSettingsPage(); return; }
+    const s = state.settings;
+    const tab = ui.settingsTab || 'general';
+    const nameOf = { general: '通用', shortcut: '快捷键', rest: '休息', app: '应用', proxy: '代理', browser: '浏览器', telegram: 'Telegram' };
+    page.querySelectorAll('#st-tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
+    const title = page.querySelector('.settings-title');
+    if (title) title.textContent = nameOf[tab] || '通用';
+    const body = page.querySelector('#st-body');
+    if (body) {
+      body.style.display = '';
+      body.innerHTML = tab === 'rest' ? restTabHtml() : tab === 'app' ? appTabHtml(s) : tab === 'shortcut' ? shortcutTabHtml() : tab === 'browser' ? browserTabHtml(s.browser || {}) : tab === 'telegram' ? telegramTabHtml(telegramConfig()) : generalTabHtml(s);
+    }
+    const res = page.querySelector('#st-sres');
+    if (res) { res.style.display = 'none'; res.innerHTML = ''; }
+    const inp = page.querySelector('#st-search');
+    if (inp) inp.value = ui.settingsQuery || '';
+    bindSettingsBodyEvents();
   }
 
   /* -------------------------------- 全局搜索 -------------------------------- */
@@ -1434,7 +4504,9 @@
   function updateStatusHint() {
     el.hint.innerHTML = '';
     let parts;
-    if (ui.settingsOpen) {
+    if (ui.proxyOpen) {
+      parts = ['代理', '点左侧「快速启动」或按 Esc 回到宫格'];
+    } else if (ui.settingsOpen) {
       parts = ['设置', '点左侧「快速启动」或按 Esc 回到宫格'];
     } else if (ui.searchPage) {
       const sp = ui.searchPage;
@@ -1576,6 +4648,14 @@
       toast('这个图标还没有设置启动目标', 'err');
       return;
     }
+    // 网址快捷方式：若开启「默认用内嵌浏览器打开」且浏览器已启用，则在内嵌浏览器中打开
+    const target = String(item.target || '');
+    const isWebUrl = /^https?:\/\//i.test(target);
+    const b = browserConfig();
+    if (isWebUrl && b.enabled && b.openLinksInApp) {
+      openBrowser(target);
+      return;
+    }
     const res = await api.launch({ target: item.target, args: item.args || '', cwd: item.cwd || '' });
     if (!res || !res.ok) {
       // 目标文件不存在：弹窗让用户选择重新编辑 / 删除 / 取消
@@ -1619,6 +4699,37 @@
         return;
       }
       toast((res && res.error) || '启动失败', 'err');
+    }
+  }
+
+  // 是否允许"通过代理启动"（自身代理开启 + 内核运行 + 未同时启用系统代理/TUN）
+  function pxCanProxyLaunch() {
+    const st = px.state;
+    return !!(st && st.running && st.selfProxy && !st.sysProxy && !st.tunMode);
+  }
+
+  // 通过代理启动（仅在自身代理+运行中+未开系统代理/TUN 时可用）
+  async function launchItemProxied(item) {
+    if (!api || !api.launchProxied) { toast('当前环境不支持代理启动', 'err'); return; }
+    if (!item || !trim(item.target)) { toast('目标为空', 'err'); return; }
+    const pxSt = px.state;
+    const ok = !!(pxSt && pxSt.running && pxSt.selfProxy && !pxSt.sysProxy && !pxSt.tunMode);
+    if (!ok) {
+      toast('代理前置条件未满足：内核运行 + 自身代理已开 + 未开系统代理/TUN', 'err');
+      return;
+    }
+    try {
+      const payload = { target: trim(item.target), args: item.args || '', cwd: item.cwd || '' };
+      const res = await api.launchProxied(payload);
+      if (res && res.ok) {
+        toast(res.proxied
+          ? ('已通过代理启动（端口 ' + (res.port || pxSt.port || 7890) + '）')
+          : '已启动（目标类型不支持代理上下文）', 'ok');
+      } else {
+        toast((res && res.error) || '启动失败', 'err');
+      }
+    } catch (_err) {
+      toast('启动失败：' + _err.message, 'err');
     }
   }
 
@@ -2366,16 +5477,62 @@
   /* --------------------------------- 页管理 --------------------------------- */
 
   function renderSidebar() {
-    // 侧栏只有一个「快速启动」入口：设置页打开时不高亮
+    // 按配置重排侧栏按钮：置顶组在前、置底组在后，组内按 order 升序
+    const nav = getSidebarNav();
+    const sorted = sortSidebarNav(nav);
+    // 第一个置底且可见的项负责「顶开」底部区域（margin-top: auto）
+    const firstBottom = sorted.find((i) => i.position === 'bottom' && i.visible);
+    const firstBottomId = firstBottom ? firstBottom.id : null;
+    sorted.forEach((item) => {
+      const btn = $('btn-' + item.id);
+      if (!btn) return;
+      btn.classList.toggle('side-foot', item.id === firstBottomId);
+      el.sidebar.appendChild(btn); // 按排序重新挂到侧栏末尾（移动现有节点，事件监听保留）
+    });
+
+    // 侧栏「快速启动」：仅在宫格页（非设置、非浏览器、非代理）高亮
     const btnQuick = $('btn-quickstart');
-    if (btnQuick) btnQuick.classList.toggle('active', !ui.settingsOpen);
+    if (btnQuick) {
+      const q = nav.find((n) => n.id === 'quickstart');
+      btnQuick.classList.toggle('hidden', q ? !q.visible : false);
+      btnQuick.classList.toggle('active', !ui.settingsOpen && !ui.browserOpen && !ui.telegramOpen && !ui.proxyOpen);
+    }
 
-    // 设置页占用宫格区域时隐藏分页工具条（设置页自带「‹ 返回」）
-    if (el.pageBar) el.pageBar.classList.toggle('hidden', ui.settingsOpen);
+    // 侧栏「浏览器」：浏览器视图打开时高亮；未启用时隐藏
+    const btnBrowser = $('btn-browser');
+    if (btnBrowser) {
+      const b = nav.find((n) => n.id === 'browser');
+      const enabled = !(state.settings && state.settings.browser && state.settings.browser.enabled === false);
+      btnBrowser.classList.toggle('hidden', (b ? !b.visible : false) || !enabled);
+      btnBrowser.classList.toggle('active', ui.browserOpen);
+    }
 
-    // 侧栏底部「设置」与「快速启动」二选一高亮
+    // 侧栏「代理」：代理页打开时高亮；配置隐藏时不显示
+    const btnProxy = $('btn-proxy');
+    if (btnProxy) {
+      const p = nav.find((n) => n.id === 'proxy');
+      btnProxy.classList.toggle('hidden', p ? !p.visible : false);
+      btnProxy.classList.toggle('active', ui.proxyOpen);
+    }
+
+    // 侧栏「Telegram」：Telegram 视图打开时高亮；配置隐藏时不显示
+    const btnTg = $('btn-telegram');
+    if (btnTg) {
+      const t = nav.find((n) => n.id === 'telegram');
+      btnTg.classList.toggle('hidden', t ? !t.visible : false);
+      btnTg.classList.toggle('active', ui.telegramOpen);
+    }
+
+    // 设置页 / 浏览器 / Telegram / 代理页占用宫格区域时隐藏分页工具条
+    if (el.pageBar) el.pageBar.classList.toggle('hidden', ui.settingsOpen || ui.browserOpen || ui.telegramOpen || ui.proxyOpen);
+
+    // 侧栏「设置」：高亮；配置隐藏时不显示
     const btnSettings = $('btn-settings');
-    if (btnSettings) btnSettings.classList.toggle('active', ui.settingsOpen);
+    if (btnSettings) {
+      const sg = nav.find((n) => n.id === 'settings');
+      btnSettings.classList.toggle('hidden', sg ? !sg.visible : false);
+      btnSettings.classList.toggle('active', ui.settingsOpen);
+    }
 
     if (!el.pageTabs) return;
     el.pageTabs.innerHTML = '';
@@ -2425,11 +5582,13 @@
     // 切换页面时退出设置页 / 搜索页（复用图标模式保留，允许跨页复用）
 
     const wasSettings = ui.settingsOpen;
+    const wasProxy = ui.proxyOpen;
     ui.settingsOpen = false;
+    if (wasProxy) { ui.proxyOpen = false; stopProxyPoll(); }
     // 从搜索结果页切到真实页：先退出搜索，再切换
     const wasSearch = exitSearch(true);
     if (id === state.activePage) {
-      if (wasSearch || wasSettings) render();
+      if (wasSearch || wasSettings || wasProxy) render();
       return;
     }
     state.activePage = id;
@@ -2642,6 +5801,9 @@
 
     openMenu(x, y, [
       { label: '打开', action: () => launchItem(item) },
+      pxCanProxyLaunch() && item.target
+        ? { label: '通过代理启动', hint: '(需开启自身代理)', action: () => launchItemProxied(item) }
+        : { sep: true },
       { label: '编辑', action: () => openItemDialog(cellKey, item) },
       { label: '复用其他图标', sub: '↗', action: () => startReuseIcon(itemId) },
       item.target && isLocalTarget(item.target)
@@ -2669,6 +5831,9 @@
     const item = hit.item;
     openMenu(x, y, [
       { label: '打开', action: () => launchItem(item) },
+      pxCanProxyLaunch() && item.target
+        ? { label: '通过代理启动', hint: '(需开启自身代理)', action: () => launchItemProxied(item) }
+        : null,
       { label: '打开所在页面', action: () => switchPage(hit.pageId) },
       { sep: true },
       { label: '编辑', action: () => { switchPage(hit.pageId); openItemDialog(hit.key, item); } },
@@ -2728,6 +5893,22 @@
 
   const REPO_URL = 'https://github.com/Muzi2333/personal-workbench';
 
+  // 通用网址打开选择：内置浏览器 / 外部浏览器
+  function openAboutLinkDialog(url) {
+    const safeUrl = String(url || '').replace(/[<>"&]/g, (c) => ({'<':'&lt;','>':'&gt;','"':'&quot;','&':'&amp;'}[c]));
+    openDialog({
+      title: '打开链接',
+      body: '<div class="hintline" style="color:var(--text);font-size:13px;margin:4px 0 8px">'
+        + '<b style="color:#5b9dff">' + safeUrl + '</b></div>'
+        + '<div style="color:var(--dim-2);font-size:12px">选择打开方式</div>',
+      buttons: [
+        { label: '内置浏览器', primary: true, onClick: () => { openBrowser(url); } },
+        { label: '外部浏览器', onClick: () => { api.launch({ target: url }); } },
+        { label: '取消', ghost: true },
+      ],
+    });
+  }
+
   /* ---------------------------------- 弹窗 ---------------------------------- */
 
   // 应用内确认框（Electron 不支持原生 window.confirm）
@@ -2740,6 +5921,27 @@
         { label: okLabel || '确定', danger: true, onClick: () => { onOk(); return true; } },
       ],
     });
+  }
+
+  // 输入对话框（替代 prompt）
+  function inputDialog(title, placeholder, defaultVal, onOk) {
+    openDialog({
+      title: title || '输入',
+      body: '<input class="input" id="dlg-input" type="text" placeholder="' + (placeholder || '') + '" value="' + String(defaultVal || '').replace(/"/g, '&quot;') + '" style="width:100%;box-sizing:border-box" />',
+      buttons: [
+        { label: '取消', ghost: true },
+        { label: '确定', primary: true, onClick: () => {
+            const inp = el.dialogBody.querySelector('#dlg-input');
+            const v = inp ? trim(inp.value) : '';
+            if (!v) { toast('请输入内容', 'err'); return false; }
+            onOk(v); return true;
+          } },
+      ],
+    });
+    setTimeout(() => {
+      const inp = el.dialogBody.querySelector('#dlg-input');
+      if (inp) { inp.focus(); inp.select(); }
+    }, 50);
   }
 
   function openDialog(options) {
@@ -3211,6 +6413,9 @@
           e.preventDefault();
           openMenu(e.clientX, e.clientY, [
             { label: '打开', action: () => launchItem(item) },
+            pxCanProxyLaunch() && item.target
+              ? { label: '通过代理启动', hint: '(需开启自身代理)', action: () => launchItemProxied(item) }
+              : null,
             { label: '编辑', action: () => { closeDialog(); openItemDialog(key, item); } },
             item.target && isLocalTarget(item.target)
               ? { label: '在资源管理器中显示', action: () => api.reveal(item.target) }
@@ -3266,6 +6471,10 @@
     $('btn-min').addEventListener('click', () => api.win.minimize());
     $('btn-max').addEventListener('click', () => api.win.toggleMax());
     $('btn-close').addEventListener('click', () => api.win.close());
+
+    // 标题栏更新提示图标：点击执行更新（下载 / 重启安装）
+    const btnUpdate = $('btn-update');
+    if (btnUpdate) btnUpdate.addEventListener('click', onUpdateBadgeClick);
 
     if (api.onWindowState) {
       api.onWindowState((s) => {
@@ -3363,7 +6572,16 @@
         state.settings.theme = source;
         scheduleSave();
         // 先应用主题再重渲染：格子样式是按当前主题取的，顺序反了就会用旧配色
-        const apply = (t) => { applyThemeDom(t); render(); };
+        const apply = (t) => {
+          applyThemeDom(t);
+          // 设置页内只同步下拉选中值，不重建页面（重建会让左侧搜索框闪动一下）
+          if (ui.settingsOpen) {
+            const sel = el.grid.querySelector('#st-theme');
+            if (sel) sel.value = state.settings.theme || 'system';
+            return;
+          }
+          render();
+        };
         if (api.theme) api.theme.set(source).then(apply).catch(() => apply({ source, dark: !dark }));
         else apply({ source, dark: !dark });
       });
@@ -3371,14 +6589,54 @@
 
     // 侧栏底部「设置」：进入 / 退出设置页
     $('btn-settings').addEventListener('click', () => {
+      if (ui.browserOpen) closeBrowser();
+      if (ui.telegramOpen) closeTelegram();
+      if (ui.proxyOpen) closeProxy();
       if (ui.settingsOpen) closeSettings();
       else openSettings();
     });
 
-    // 侧栏「快速启动」：从设置页或搜索页回到宫格
+    // 侧栏「Telegram」：左键进入 / 退出；右键弹出 刷新 / 重启 菜单
+    const btnTgNav = $('btn-telegram');
+    if (btnTgNav) {
+      btnTgNav.addEventListener('click', () => {
+        if (ui.telegramOpen) closeTelegram();
+        else openTelegram();
+      });
+      btnTgNav.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        openTelegramMenu(e.clientX, e.clientY);
+      });
+    }
+
+    // 侧栏「代理」：进入 / 退出代理管理页
+    const btnProxyNav = $('btn-proxy');
+    if (btnProxyNav) {
+      btnProxyNav.addEventListener('click', () => {
+        if (ui.proxyOpen) closeProxy();
+        else openProxy();
+      });
+    }
+
+    // 内核下载进度：原地更新提示文字（不重建整页）
+    if (proxyApi && proxyApi.onCoreProgress) {
+      proxyApi.onCoreProgress((p) => {
+        if (!px.downloading) return;
+        px.dlMessage = (p && p.message) || '';
+        const msgEl = $('px-dl-msg');
+        if (msgEl) msgEl.textContent = px.dlMessage;
+        const dlB = $('px-dl-core');
+        if (dlB && p && p.stage === 'download') dlB.textContent = '下载中 ' + (p.percent || 0) + '%';
+      });
+    }
+
+    // 侧栏「快速启动」：从设置页 / 浏览器 / 代理页 / 搜索页回到宫格
     const btnQuick = $('btn-quickstart');
     if (btnQuick) {
       btnQuick.addEventListener('click', () => {
+        if (ui.browserOpen) { closeBrowser(); return; }
+        if (ui.telegramOpen) { closeTelegram(); return; }
+        if (ui.proxyOpen) { closeProxy(); return; }
         if (ui.searchPage) { toggleSearch(false); return; }
         if (ui.settingsOpen) { closeSettings(); return; }
         render();
@@ -3529,8 +6787,8 @@
     el.grid.addEventListener('contextmenu', (e) => {
       e.preventDefault();
 
-      // 设置页：不弹任何右键菜单
-      if (ui.settingsOpen) return;
+      // 设置页 / 代理页：不弹宫格右键菜单
+      if (ui.settingsOpen || ui.proxyOpen) return;
 
       // 搜索结果页：右键打开所在页面
       if (ui.searchPage) {
@@ -3570,67 +6828,6 @@
       openCellMenu(cell.dataset.key, e.clientX, e.clientY);
     });
 
-    // 拖入文件：落在格子上进该格，落在画布空白处进当前格（桌面拖来也能接住）
-    window.addEventListener('dragover', (e) => e.preventDefault());
-    el.canvas.addEventListener('dragover', (e) => {
-      if (!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'))) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'copy';
-      if (ui.searchPage || ui.settingsOpen) return;
-      const cell = e.target.closest('.cell');
-      if (cell) cell.classList.add('drop-hover');
-    });
-    el.canvas.addEventListener('dragleave', (e) => {
-      const cell = e.target.closest('.cell');
-      if (cell) cell.classList.remove('drop-hover');
-    });
-    el.canvas.addEventListener('drop', async (e) => {
-      e.preventDefault();
-      // 设置页 / 搜索结果页只读：不允许把文件加进去
-      if (ui.settingsOpen) return;
-      if (ui.searchPage) {
-        toast('搜索结果页不能添加图标，按 Esc 退出搜索后再拖入', 'err');
-        return;
-      }
-      const cell = e.target.closest('.cell');
-      const key = cell ? cell.dataset.key : (ui.activeCell || firstCellKey());
-      clearHighlight();
-      if (!key) return;
-      const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
-      const paths = files.map((f) => api.pathForFile(f)).filter(Boolean);
-      if (!paths.length) {
-        if (files.length) toast(isElectron ? '没有读取到文件路径' : '浏览器预览模式无法读取本地文件路径', 'err');
-        return;
-      }
-      const targetCell = cellOf(key, true);
-      pushHistory();
-      // .lnk 快捷方式：名字用 .lnk 文件名，目标指向它真实指向的程序
-      const resolved = await Promise.all(paths.map(async (p) => {
-        let target = p;
-        if (api.resolveShortcut) {
-          try {
-            const info = await api.resolveShortcut(p);
-            if (info && info.target) target = info.target;
-          } catch (_) {}
-        }
-        return { name: baseName(p), target };
-      }));
-      resolved.forEach((r) => {
-        targetCell.items.push({
-          id: Grid.newId('i'),
-          name: r.name,
-          target: r.target,
-          args: '',
-          cwd: '',
-          icon: { type: 'auto', value: '' },
-        });
-      });
-      scheduleSave();
-      render();
-      requestIcons();
-      toast('已添加 ' + resolved.length + ' 个快捷方式', 'ok');
-    });
-
     // 全局关闭菜单 / 弹窗
     document.addEventListener('pointerdown', (e) => {
       if (!el.menu.classList.contains('hidden') && !e.target.closest('.menu')) closeMenu();
@@ -3648,6 +6845,48 @@
         const ae = document.activeElement;
         return !!(ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.tagName === 'SELECT' || ae.isContentEditable));
       })();
+
+      // 正在录制侧边栏快捷键：捕获下一次按键
+      if (ui.sidebarShortcutListening) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === 'Escape') {
+          ui.sidebarShortcutListening = null;
+          updateSettingsPage();
+          return;
+        }
+        // 单独按修饰键不录制
+        if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
+        const id = ui.sidebarShortcutListening;
+        const nav = getSidebarNav();
+        const item = nav.find((n) => n.id === id);
+        if (!item) { ui.sidebarShortcutListening = null; return; }
+        if (e.key === 'Backspace') {
+          // 退格清除快捷键
+          item.shortcut = '';
+          state.settings.sidebarNav = nav;
+          scheduleSave();
+          ui.sidebarShortcutListening = null;
+          toast('已清除快捷键', 'ok');
+          updateSettingsPage();
+          return;
+        }
+        // 冲突检查：与应用快捷键及其它侧边栏项冲突
+        const conflictApp = Object.keys(shortcuts).find((k) => shortcuts[k] === str);
+        const conflictSide = nav.find((n) => n.id !== id && n.shortcut === str);
+        if (conflictApp || conflictSide) {
+          const cdef = conflictApp ? (SHORTCUT_DEFS.find((d) => d.id === conflictApp) || {}).name : (conflictSide && (SIDEBAR_ITEMS.find((d) => d.id === conflictSide.id) || {}).name);
+          toast('该按键已被「' + (cdef || '其它项') + '」占用', 'err');
+          return;
+        }
+        item.shortcut = str;
+        state.settings.sidebarNav = nav;
+        scheduleSave();
+        ui.sidebarShortcutListening = null;
+        toast('已设置为 ' + formatShortcut(str), 'ok');
+        updateSettingsPage();
+        return;
+      }
 
       // 正在录制快捷键：捕获下一次按键
       if (ui.shortcutListening) {
@@ -3692,16 +6931,8 @@
         if (ui.reuseIcon) { cancelReuseIcon(); return; }
         closeMenu();
         if (!el.overlay.classList.contains('hidden')) closeDialog();
-        if (ui.settingsOpen) {
-          // 设置页搜索展开时，Esc 先收起搜索框；再按才退出设置页
-          if (ui.settingsSearchOpen) {
-            ui.settingsSearchOpen = false;
-            ui.settingsQuery = '';
-            render();
-          } else {
-            closeSettings();
-          }
-        }
+        if (ui.settingsOpen) closeSettings();
+        if (ui.proxyOpen) { closeProxy(); }
         if (document.activeElement === search || ui.searchPage) {
           toggleSearch(false);
           search.blur();
@@ -3721,11 +6952,20 @@
         return;
       }
 
+      // 侧边栏快捷键（F1~F5 等）：即便在输入框内也生效（F 键不产生文本）
+      const sideHit = getSidebarNav().find((n) => n.visible && n.shortcut && n.shortcut === str);
+      if (sideHit) {
+        e.preventDefault();
+        const btn = $('btn-' + sideHit.id);
+        if (btn && !btn.classList.contains('hidden')) btn.click();
+        return;
+      }
+
       // 以下为可配置的应用级快捷键：输入框内不拦截（交给原生编辑）
       if (typing) return;
 
       // 删除悬停的应用（宫格 / 文件夹弹窗内均可）
-      if (str === shortcuts.delete && !ui.settingsOpen && !ui.searchPage) {
+      if (str === shortcuts.delete && !ui.settingsOpen && !ui.searchPage && !ui.proxyOpen) {
         const overlayHidden = el.overlay.classList.contains('hidden');
         if (overlayHidden || ui.folderDialogKey !== null) {
           // 先删悬停的图标；没有图标时，按悬停的页签 / 行标题 / 列标题 / 格子分别删除
@@ -3743,7 +6983,7 @@
       }
 
       // 添加应用
-      if (str === shortcuts.add && el.overlay.classList.contains('hidden') && !ui.settingsOpen) {
+      if (str === shortcuts.add && el.overlay.classList.contains('hidden') && !ui.settingsOpen && !ui.proxyOpen) {
         e.preventDefault();
         if (ui.searchPage) { toast('搜索结果页不能添加图标，按 Esc 退出搜索后再试', 'err'); return; }
         openItemDialog(ui.activeCell || firstCellKey(), null);
@@ -3779,6 +7019,7 @@
   async function boot() {
     el.canvas = $('canvas');
     el.grid = $('grid');
+    el.telegram = $('telegram');
     el.menu = $('menu');
     el.toast = $('toast');
     el.overlay = $('overlay');
@@ -3791,6 +7032,58 @@
     el.pageTabs = $('page-tabs');
     el.tbSearch = $('tb-search');
 
+    // ⚠️ 拖入文件的 dragover 必须在任何 await 之前注册，否则 Electron 会拒绝外部文件拖入（红色禁止图标）
+    window.addEventListener('dragover', (e) => { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'; });
+    el.canvas.addEventListener('dragover', (e) => {
+      if (!(e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files'))) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      if (ui.searchPage || ui.settingsOpen) return;
+      const cell = e.target.closest('.cell');
+      if (cell) cell.classList.add('drop-hover');
+    });
+    el.canvas.addEventListener('dragleave', (e) => {
+      const cell = e.target.closest('.cell');
+      if (cell) cell.classList.remove('drop-hover');
+    });
+    async function handleDrop(e) {
+      e.preventDefault();
+      // 防重入：事件冒泡会先触发 canvas 再触发 window，同一个 drop 只处理一次
+      if (e.__workbenchDropHandled) return;
+      e.__workbenchDropHandled = true;
+      if (ui.settingsOpen || ui.proxyOpen || ui.browserOpen || ui.telegramOpen) return;
+      if (ui.searchPage) { toast('搜索结果页不能添加图标，按 Esc 退出搜索后再拖入', 'err'); return; }
+      const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+      if (!files.length) return;
+      const cell = e.target.closest && e.target.closest('.cell');
+      const key = cell ? cell.dataset.key : (ui.activeCell || firstCellKey());
+      clearHighlight();
+      if (!key) return;
+      const paths = files.map((f) => api.pathForFile(f)).filter(Boolean);
+      if (!paths.length) {
+        if (files.length) toast(isElectron ? '没有读取到文件路径' : '浏览器预览模式无法读取本地文件路径', 'err');
+        return;
+      }
+      const targetCell = cellOf(key, true);
+      pushHistory();
+      const resolved = await Promise.all(paths.map(async (p) => {
+        let target = p;
+        if (api.resolveShortcut) {
+          try { const info = await api.resolveShortcut(p); if (info && info.target) target = info.target; } catch (_) {}
+        }
+        return { name: baseName(p), target };
+      }));
+      resolved.forEach((r) => {
+        targetCell.items.push({ id: Grid.newId('i'), name: r.name, target: r.target, args: '', cwd: '', icon: { type: 'auto', value: '' } });
+      });
+      scheduleSave();
+      render();
+      requestIcons();
+      toast('已添加 ' + resolved.length + ' 个快捷方式', 'ok');
+    }
+    el.canvas.addEventListener('drop', handleDrop);
+    window.addEventListener('drop', handleDrop);
+
     const saved = await api.loadData();
     state = normalize(saved) || defaults();
     ui.activeCell = firstCellKey();
@@ -3799,6 +7092,7 @@
     if (sbBtn) sbBtn.title = state.settings.sidebar === false ? '展开侧边栏' : '折叠侧边栏（只显示图标）';
 
     bindEvents();
+    bindBrowserEvents();
     render();
     requestIcons();
 
@@ -3809,10 +7103,33 @@
     restApi.getStatus().then(paintTbRest).catch(() => {});
     restApi.onStatus(paintTbRest);
 
+    // 代理状态：启动后主动拉一次（autoStart 会在主进程 init() 里异步 startCore，
+    // 前端必须显式 getState 才能拿到 running=true，胶囊才会出现）
+    refreshProxyState(false);
+    // 胶囊需要持续显示当前节点与实时速率：启动常驻轮询（代理未运行时会自动跳过）
+    startProxyPillPoll();
+    // 同时订阅主进程广播：任何状态变化（autoStart ready、切模式等）都实时刷新
+    try {
+      api.proxyApi.onState((s) => {
+        px.state = s;
+        paintProxyPill($('tb-rest'));
+        if (ui.proxyOpen) refreshProxyState(false);
+      });
+    } catch (_) {}
+
+    // 自动更新：订阅主进程状态推送；开关开启时启动后静默检查（发现新版本自动下载）
+    if (updatesApi.onState) {
+      updatesApi.onState((s) => {
+        applyUpdateState(s || {});
+        if (s && s.status === 'downloaded') toast('新版本 v' + (s.latestVersion || '') + ' 已下载，重启后安装', 'ok');
+      });
+    }
+    if (state.settings.autoUpdate) runUpdateCheck(true);
+
     // 主题：读当前配置并订阅系统变化
     applyCurrentTheme();
-    if (api.theme) api.theme.onChange((t) => { applyThemeDom(t); render(); });
-    if (api.theme) api.theme.get().then((t) => { applyThemeDom(t); render(); }).catch(() => {});
+    if (api.theme) api.theme.onChange((t) => { applyThemeDom(t); if (!ui.settingsOpen) render(); });
+    if (api.theme) api.theme.get().then((t) => { applyThemeDom(t); if (!ui.settingsOpen) render(); }).catch(() => {});
     else applyThemeDom({ source: state.settings.theme || 'system', dark: true });
 
     if (!isElectron) {

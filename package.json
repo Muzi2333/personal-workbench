@@ -1,7 +1,7 @@
 {
   "name": "workbench",
   "productName": "工作台",
-  "version": "0.2.3",
+  "version": "0.2.5",
   "private": true,
   "description": "个人工作台 - 图标宫格快捷启动",
   "main": "main.js",
@@ -16,10 +16,19 @@
     "directories": {
       "output": "dist"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Muzi2333",
+        "repo": "personal-workbench"
+      }
+    ],
     "files": [
       "main.js",
       "preload.js",
       "rest.js",
+      "proxy.js",
+      "renderer/tg-preload.js",
       "renderer/**/*",
       "assets/**/*",
       "tools/icon-extract.ps1",
@@ -54,5 +63,8 @@
     "electron": "^33.0.0",
     "electron-builder": "^26.18.0",
     "pinyin-pro": "^3.29.5"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
   }
 }

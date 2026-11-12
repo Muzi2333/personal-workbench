@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const { spawn, execFile } = require('child_process');
 const { createRestManager } = require('./rest');
+const { createProxyManager } = require('./proxy');
 
 // 任务管理器 / 任务栏分组名（打包后进程名由 exe 文件名决定，这里设置内部名）
 app.setName('工作台');
@@ -12,6 +13,7 @@ app.setAppUserModelId('com.muzi.workbench');
 let win = null;
 let tray = null;
 let restManager = null;
+let proxyManager = null;
 
 // 贴边自动收起（QQ 式吸边）
 const EDGE_SNAP = {
@@ -208,6 +210,53 @@ function wireEdgeSnapWindowEvents() {
 const dataFile = () => path.join(app.getPath('userData'), 'data.json');
 const backupFile = () => path.join(app.getPath('userData'), 'data.backup.json');
 
+// Windows 文件名/文件夹名安全化：
+// 去掉非法字符与控制符/零宽字符，去掉结尾的点和空格（Windows 会静默吞掉，导致路径对不上），
+// 避开 CON/PRN/AUX/NUL/COM1-9/LPT1-9 等保留设备名，并按码点截断（避免切断 emoji 代理对）
+function safePathName(raw, fallback) {
+  let s = String(raw == null ? '' : raw);
+  s = s.replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF\u00AD]/g, ''); // 零宽 / 方向控制
+  s = s.replace(/[\u0000-\u001F\u007F]/g, '');                                 // 控制字符
+  s = s.replace(/[<>:"/\\|?*]/g, '_');                                          // Windows 非法字符
+  s = s.replace(/\s+/g, ' ').trim();
+  s = s.replace(/[. ]+$/g, '');                                                 // 结尾的点 / 空格
+  const cps = Array.from(s);
+  if (cps.length > 60) s = cps.slice(0, 60).join('').replace(/[. ]+$/g, '');
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(s)) s = '_' + s;
+  return s || fallback || '未分组';
+}
+
+/* ---------------------------- 主窗口尺寸记忆 ---------------------------- */
+// 单独存一个文件，避免与渲染层 data.json 互相覆盖
+const winStateFile = () => path.join(app.getPath('userData'), 'window-state.json');
+
+function readWindowState() {
+  try {
+    const s = JSON.parse(fs.readFileSync(winStateFile(), 'utf8'));
+    if (s && Number.isFinite(s.width) && Number.isFinite(s.height)) {
+      return { width: s.width, height: s.height };
+    }
+  } catch (_) {}
+  return null;
+}
+
+// 最大化 / 最小化 / 全屏时不写入，保留正常的窗口尺寸
+function saveWindowState() {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized() || win.isMaximized() || win.isFullScreen()) return;
+  const b = win.getBounds();
+  try {
+    fs.writeFileSync(winStateFile(), JSON.stringify({ width: b.width, height: b.height }), 'utf8');
+  } catch (_) {}
+}
+
+// 拖动调整过程中频繁触发，防抖 600ms 后再写盘
+let winStateTimer = null;
+function scheduleSaveWindowState() {
+  if (winStateTimer) clearTimeout(winStateTimer);
+  winStateTimer = setTimeout(saveWindowState, 600);
+}
+
 function showMainWindow() {
   if (!win || win.isDestroyed()) return;
   if (!win.isVisible()) win.show();
@@ -215,23 +264,83 @@ function showMainWindow() {
   win.focus();
 }
 
-// 登录项：写入与读取必须用同一组 path/args，否则命令行比对不一致，永远读回 false
-const loginItemOpts = () => ({ path: process.execPath, args: [app.getAppPath()] });
+// 开机自启：
+// - 普通权限启动 → 写 HKCU\Run（Electron loginItem）；
+// - 以管理员身份启动（exe 勾了“以管理员身份运行”/RUNASADMIN）时，Windows 会直接忽略 Run 里的提权程序，
+//   只能改用「登录时触发 + 最高权限」的计划任务（schtasks ONLOGON /RL HIGHEST），否则开机根本不会启动。
+const TASK_NAME = '个人工作台';
 
-function getAutoLaunch() {
-  try { return app.getLoginItemSettings(loginItemOpts()).openAtLogin; } catch (_) { return false; }
+// 打包后不能再把 app.asar 当参数传进去，否则注册表命令行对不上、启动也会异常
+const loginItemOpts = () => (app.isPackaged
+  ? { path: process.execPath, args: [] }
+  : { path: process.execPath, args: [app.getAppPath()] });
+
+let autoLaunchState = { ok: true, enabled: false, mechanism: '', elevated: false, exe: process.execPath };
+
+function isElevated() {
+  if (isElevated._v != null) return Promise.resolve(isElevated._v);
+  // exe 勾了“以管理员身份运行”时，兼容性层会注入 __COMPAT_LAYER=RunAsAdmin
+  if (/runasadmin/i.test(String(process.env.__COMPAT_LAYER || ''))) {
+    isElevated._v = true;
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    execFile('net', ['session'], { windowsHide: true }, (err) => {
+      isElevated._v = !err;
+      resolve(isElevated._v);
+    });
+  });
 }
 
-function setAutoLaunch(enabled) {
-  app.setLoginItemSettings(Object.assign({ openAtLogin: !!enabled }, loginItemOpts()));
+function schtasksRun(args) {
+  return new Promise((resolve) => {
+    execFile('schtasks', args, { windowsHide: true }, (err, stdout) => {
+      resolve({ ok: !err, out: String(stdout || ''), err: err ? String(err.message || err) : '' });
+    });
+  });
+}
+
+async function getAutoLaunchStatus() {
+  let task = false;
+  try { task = (await schtasksRun(['/Query', '/TN', TASK_NAME])).ok; } catch (_) {}
+  let runKey = false;
+  try { runKey = !!app.getLoginItemSettings(loginItemOpts()).openAtLogin; } catch (_) {}
+  const elevated = await isElevated();
+  return { ok: true, enabled: task || runKey, mechanism: task ? 'task' : (runKey ? 'run' : ''), elevated, exe: process.execPath };
+}
+
+async function refreshAutoLaunch() {
+  autoLaunchState = await getAutoLaunchStatus();
+  return autoLaunchState;
+}
+
+async function setAutoLaunch(enabled) {
+  const elevated = await isElevated();
+  // 先清掉两种方式的旧记录，避免重复启动
+  await schtasksRun(['/Delete', '/TN', TASK_NAME, '/F']);
+  try { app.setLoginItemSettings(Object.assign({ openAtLogin: false }, loginItemOpts())); } catch (_) {}
+  if (!enabled) return { ok: true, enabled: false, mechanism: '', elevated };
+
+  if (elevated) {
+    const r = await schtasksRun([
+      '/Create', '/TN', TASK_NAME,
+      '/TR', '"' + process.execPath + '"',
+      '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F',
+    ]);
+    if (!r.ok) throw new Error(r.err || '创建计划任务失败（需要管理员权限）');
+    return { ok: true, enabled: true, mechanism: 'task', elevated };
+  }
+  app.setLoginItemSettings(Object.assign({ openAtLogin: true }, loginItemOpts()));
+  return { ok: true, enabled: !!app.getLoginItemSettings(loginItemOpts()).openAtLogin, mechanism: 'run', elevated };
 }
 
 function rebuildTrayMenu() {
   if (!tray) return;
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '显示主界面', click: showMainWindow },
-    { label: '开机自动启动', type: 'checkbox', checked: getAutoLaunch(), click: (item) => {
-      try { setAutoLaunch(item.checked); } catch (_) {}
+    { label: '开机自动启动', type: 'checkbox', checked: !!autoLaunchState.enabled, click: async (item) => {
+      try { await setAutoLaunch(item.checked); } catch (_) {}
+      await refreshAutoLaunch();
       rebuildTrayMenu(); // 以真实状态重建，失败时复选框自动回弹
     } },
     { type: 'separator' },
@@ -279,11 +388,19 @@ function createWindow() {
   initEdgeSnap();
   const sf = (screen.getPrimaryDisplay() && screen.getPrimaryDisplay().scaleFactor) || 1;
   const work = screen.getPrimaryDisplay().workAreaSize;
+  const minW = Math.round(800 / sf);
+  const minH = Math.round(600 / sf);
+  const defW = Math.min(Math.round(1400 / Math.max(sf, 1)), work.width);
+  const defH = Math.min(Math.round(920 / Math.max(sf, 1)), work.height);
+  // 上次退出时的窗口尺寸；夹在最小尺寸与当前屏幕工作区内，避免换分辨率后超出屏幕
+  const saved = readWindowState();
+  const width = saved ? Math.min(Math.max(saved.width, minW), work.width) : defW;
+  const height = saved ? Math.min(Math.max(saved.height, minH), work.height) : defH;
   win = new BrowserWindow({
-    width: Math.min(Math.round(1400 / Math.max(sf, 1)), work.width),
-    height: Math.min(Math.round(920 / Math.max(sf, 1)), work.height),
-    minWidth: Math.round(800 / sf),
-    minHeight: Math.round(600 / sf),
+    width,
+    height,
+    minWidth: minW,
+    minHeight: minH,
     frame: false,
     show: false,
     backgroundColor: '#1a1b1c',
@@ -293,19 +410,51 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      webviewTag: true,   // 内嵌浏览器（侧边栏「浏览器」）用 <webview>
     },
   });
 
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   win.once('ready-to-show', () => win.show());
 
+  // 渲染进程报错写入日志，便于排查（%APPDATA%\工作台\renderer-errors.log）
+  win.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+    if (level >= 2) {
+      try {
+        const logFile = path.join(app.getPath('userData'), 'renderer-errors.log');
+        fs.appendFileSync(logFile, `${new Date().toISOString()} ${message} (${sourceId}:${line})\n`, 'utf8');
+      } catch (_) {}
+    }
+  });
+
+  // Telegram webview（guest）的控制台日志单独落盘，便于诊断媒体拦截（%APPDATA%\工作台\tg-media.log）
+  app.on('web-contents-created', (_e, contents) => {
+    contents.on('console-message', (_ev, level, message) => {
+      const msg = String(message || '');
+      if (msg.indexOf('[tg-preload]') !== 0) return;
+      try {
+        const logFile = path.join(app.getPath('userData'), 'tg-media.log');
+        // 超过 512KB 时清空重写，避免无限增长
+        try {
+          if (fs.existsSync(logFile) && fs.statSync(logFile).size > 512 * 1024) fs.unlinkSync(logFile);
+        } catch (_) {}
+        fs.appendFileSync(logFile, `${new Date().toISOString()} ${msg}\n`, 'utf8');
+      } catch (_) {}
+    });
+  });
+
   // 关闭按钮 = 隐藏到托盘，只有托盘右键「退出」才真正结束进程
   win.on('close', (e) => {
+    saveWindowState();
     if (!app.isQuitting) {
       e.preventDefault();
       win.hide();
     }
   });
+
+  // 改变窗口大小后记录尺寸（退出/隐藏时也会再存一次）
+  win.on('resize', scheduleSaveWindowState);
+  win.on('unmaximize', scheduleSaveWindowState);
 
   const pushState = () => {
     if (win && !win.isDestroyed()) {
@@ -356,25 +505,177 @@ if (!app.requestSingleInstanceLock()) {
     applyThemeSource(source);
   }
 
+  // Windows：检测是否以管理员身份运行
+  function isAdmin() {
+    if (process.platform !== 'win32') return false;
+    try {
+      // net session 只有管理员才能成功执行
+      child_process.execSync('net session', { stdio: 'ignore' });
+      return true;
+    } catch (_) { return false; }
+  }
+
   app.whenReady().then(() => {
+    // 自动降级：以管理员启动但没开 TUN 模式时，spawn 一个非管理员实例然后退出
+    if (isAdmin()) {
+      let forceAdmin = process.argv.includes('--force-admin');
+      let tunWanted = false;
+      try {
+        if (fs.existsSync(dataFile())) {
+          const cfg = JSON.parse(fs.readFileSync(dataFile(), 'utf8'));
+          tunWanted = !!(cfg && cfg.proxy && cfg.proxy.tunMode);
+        }
+      } catch (_) {}
+      if (!forceAdmin && !tunWanted) {
+        const exe = process.execPath;
+        console.log('[admin-downgrade] 检测到管理员启动，且未开启 TUN 模式，重启为非管理员');
+        // shell 以当前用户权限 spawn 自己（绕过管理员）
+        child_process.spawn(exe, ['--user-level'], { shell: true, detached: true, windowsHide: false });
+        setTimeout(() => { app.quit(); }, 300);
+        return;
+      }
+    }
+
     loadAndApplyTheme();
     nativeTheme.on('updated', broadcastTheme);
     createWindow();
     createTray();
+    // 异步读取真实的自启状态（计划任务 / Run 项），读完后刷新托盘勾选
+    refreshAutoLaunch().then(() => rebuildTrayMenu()).catch(() => {});
     restManager = createRestManager({ getMainWindow: () => win, onStatus: updateTrayTip });
+    proxyManager = createProxyManager({ getMainWindow: () => win });
+    proxyManager.init();
+    // 以 runas 重启并要求开启 TUN 的实例：管理员权限就绪后自动开启
+    if (process.argv.includes('--enable-tun')) {
+      (async () => {
+        try {
+          await new Promise((r) => setTimeout(r, 800)); // 等 init 里的自动启动
+          const st = proxyManager.getState();
+          if (!st.running) await proxyManager.startCore();
+          const r = await proxyManager.setTun(true);
+          if (!r.ok) console.error('[enable-tun]', r.error);
+        } catch (e) { console.error('[enable-tun]', e); }
+      })();
+    }
     updateTrayTip(restManager.getStatus());
     broadcastTheme();
+    // 拦截所有 webview 的新窗口请求，转发给渲染进程在当前浏览器内新开标签页
+    app.on('web-contents-created', (event, contents) => {
+      if (contents.getType() !== 'webview') return;
+      contents.setWindowOpenHandler(({ url }) => {
+        if (win && !win.isDestroyed()) {
+          win.webContents.send('browser:new-tab', url);
+        }
+        return { action: 'deny' };
+      });
+    });
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+
+    // Telegram 网页版下载：不弹保存框，直接以原始文件名（jpg/mp4 等原格式）存入系统下载目录，重名自动加序号
+    try {
+      const { session } = require('electron');
+      const tgSes = session.fromPartition('persist:telegram');
+      tgSes.on('will-download', (event, item) => {
+        try {
+          const rawName = item.getFilename() || 'download';
+          // 读用户配置的保存路径（与自动保存共用同一个）
+          let dlDir = app.getPath('downloads');
+          try {
+            if (fs.existsSync(dataFile())) {
+              const raw = JSON.parse(fs.readFileSync(dataFile(), 'utf8'));
+              const tg = (raw && raw.settings && raw.settings.telegram) || {};
+              const p = String(tg.saveMediaPath || '').trim();
+              if (p) dlDir = p;
+            }
+          } catch (_) {}
+          fs.mkdirSync(dlDir, { recursive: true });
+          const dot = rawName.lastIndexOf('.');
+          const base = safePathName(dot > 0 ? rawName.slice(0, dot) : rawName, 'file');
+          const ext = dot > 0 ? rawName.slice(dot).replace(/[^\w.]/g, '') : '';
+          let dest = path.join(dlDir, base + ext);
+          for (let i = 1; fs.existsSync(dest) && i < 1000; i++) {
+            dest = path.join(dlDir, base + ' (' + i + ')' + ext);
+          }
+          item.setSavePath(dest);
+          // 诊断：记录下载全过程（blob 下载失败时会留下 0 字节空壳）
+          const logDl = (tag) => {
+            try {
+              const logFile = path.join(app.getPath('userData'), 'tg-download.log');
+              try { if (fs.existsSync(logFile) && fs.statSync(logFile).size > 256 * 1024) fs.unlinkSync(logFile); } catch (_) {}
+              fs.appendFileSync(logFile, `${new Date().toISOString()} ${tag} url=${item.getURL()} name=${rawName} total=${item.getTotalBytes()} received=${item.getReceivedBytes()}\n`, 'utf8');
+            } catch (_) {}
+          };
+          logDl('[start]');
+          item.on('done', (_e, state) => {
+            logDl('[done:' + state + ']');
+            // 失败/中断时删掉 0 字节空壳，避免误以为已下载
+            try {
+              if (item.getReceivedBytes() === 0 && fs.existsSync(dest)) fs.unlinkSync(dest);
+            } catch (_) {}
+          });
+        } catch (_) {}
+      });
+    } catch (_) {}
+
+    // Telegram 注入脚本路径（webview preload 用）
+    ipcMain.handle('app:tg-preload-path', () => path.join(__dirname, 'renderer', 'tg-preload.js'));
+
+    // Telegram 页面内拦截到的媒体 Blob：按 频道/群 分目录静默保存
+    ipcMain.handle('tg:save-media', (e, payload) => {
+      try {
+        if (!payload || !payload.data) return { ok: false, error: 'empty' };
+        // 读用户配置：enabled 开关 + 自定义路径
+        let enabled = true;
+        let rootPath = '';
+        try {
+          if (fs.existsSync(dataFile())) {
+            const raw = JSON.parse(fs.readFileSync(dataFile(), 'utf8'));
+            const tg = (raw && raw.settings && raw.settings.telegram) || {};
+            enabled = tg.enabled !== false; // 默认 true
+            rootPath = String(tg.saveMediaPath || '').trim();
+          }
+        } catch (_) {}
+        if (!enabled) return { ok: false, error: 'disabled' };
+
+        // 根目录：自定义路径 或 默认下载\Telegram
+        const baseDir = rootPath
+          || path.join(app.getPath('downloads'), 'Telegram');
+        const chatRaw = String(payload.chat || '').trim();
+        const chat = safePathName(chatRaw, '未分组');
+        const dir = path.join(baseDir, chat);
+        fs.mkdirSync(dir, { recursive: true });
+        const ext = /^\.[a-z0-9]{2,5}$/i.test(payload.ext || '') ? payload.ext : '.bin';
+        const now = new Date();
+        const pad = (n) => String(n).padStart(2, '0');
+        const stamp = now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate()) + '_'
+          + pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds());
+        let dest = path.join(dir, stamp + ext);
+        for (let i = 1; fs.existsSync(dest) && i < 1000; i++) {
+          dest = path.join(dir, stamp + '_' + i + ext);
+        }
+        fs.writeFileSync(dest, Buffer.from(payload.data));
+        return { ok: true, path: dest, size: payload.size };
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err) };
+      }
     });
   });
 
   // 退出时必须停止休息模块的定时器与系统事件监听，避免后台残留逻辑
-  app.on('before-quit', () => {
+  app.on('before-quit', (e) => {
     app.isQuitting = true;
     if (restManager) {
       restManager.destroy();
       restManager = null;
+    }
+    // 代理内核需要先关系统代理再杀内核，否则系统代理指向死端口导致断网
+    if (proxyManager) {
+      e.preventDefault();
+      const pm = proxyManager;
+      proxyManager = null;
+      pm.shutdown().finally(() => app.quit());
     }
   });
 
@@ -452,13 +753,16 @@ ipcMain.handle('app:open-data-dir', async () => {
 /* -------------------------------- 开机自启动 -------------------------------- */
 // 开关在托盘右键菜单（checkbox）。保留 IPC 供冒烟测试与未来渲染层使用。
 
-ipcMain.handle('app:get-auto-launch', async () => ({ ok: true, enabled: getAutoLaunch() }));
+ipcMain.handle('app:get-auto-launch', async () => {
+  try { return await refreshAutoLaunch(); } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) }; }
+});
 
 ipcMain.handle('app:set-auto-launch', async (_e, enabled) => {
   try {
-    setAutoLaunch(enabled);
+    await setAutoLaunch(!!enabled);
+    const st = await refreshAutoLaunch();
     rebuildTrayMenu();
-    return { ok: true, enabled: !!enabled };
+    return st;
   } catch (err) {
     return { ok: false, error: String(err && err.message ? err.message : err) };
   }
@@ -580,6 +884,106 @@ async function launchTarget({ target, args, cwd } = {}) {
     return { ok: false, error: '找不到目标：' + raw };
   }
 }
+
+// Chromium 系浏览器只认 --proxy-server 参数，不读 HTTP_PROXY 环境变量
+const CHROMIUM_PROXY_EXES = ['chrome.exe', 'msedge.exe', 'brave.exe', 'vivaldi.exe', 'opera.exe', 'chromium.exe', 'thorium.exe'];
+
+// 通过代理启动：仅在「自身代理」开启（且未启用系统代理/TUN）时带代理参数启动，
+// 其他代理模式下应用本身已走代理，按默认方式启动即可
+async function launchTargetProxied(payload = {}) {
+  const st = proxyManager ? proxyManager.getState() : null;
+  const useProxy = !!(st && st.running && st.selfProxy && !st.sysProxy && !st.tunMode);
+  console.log('[launchTargetProxied] state=', st, 'useProxy=', useProxy);
+  if (!useProxy) {
+    const r = await launchTarget(payload);
+    return { ...r, proxied: false };
+  }
+
+  let raw = String(payload.target || '').trim().replace(/^"(.*)"$/, '$1');
+  if (!raw) return { ok: false, error: '启动目标为空' };
+
+  // URL / 协议链接：交给系统默认方式打开（无代理上下文）
+  const scheme = raw.match(/^([a-z][a-z0-9+.-]*):(.*)$/i);
+  const isDrive = /^[A-Za-z]:\\/.test(raw) || /^[A-Za-z]:$/.test(raw);
+  if (scheme && !isDrive) {
+    const r = await launchTarget(payload);
+    return { ...r, proxied: false };
+  }
+
+  if (!fs.existsSync(raw)) {
+    return { ok: false, code: 'NOT_FOUND', error: '找不到目标文件', target: raw, proxied: false };
+  }
+
+  // .lnk 快捷方式：解析出真实 exe 再启动。否则只能走 cmd start，
+  // 浏览器根本不读 HTTP_PROXY 环境变量，代理等于没开
+  let extraArgs = [];
+  if (/\.lnk$/i.test(raw)) {
+    try {
+      const link = await resolveLnkPath(raw, 0);
+      if (link && link.target && !/\.lnk$/i.test(link.target) && fs.existsSync(link.target)) {
+        raw = link.target;
+        extraArgs = splitArgs(link.args);
+        if (!payload.cwd && link.cwd && fs.existsSync(link.cwd)) payload = { ...payload, cwd: link.cwd };
+      }
+    } catch (_) {}
+  }
+
+  const port = st.port || 7890;
+  const proxyUrl = 'http://127.0.0.1:' + port;
+  const env = {
+    ...process.env,
+    HTTP_PROXY: proxyUrl, HTTPS_PROXY: proxyUrl, ALL_PROXY: proxyUrl,
+    http_proxy: proxyUrl, https_proxy: proxyUrl, all_proxy: proxyUrl,
+    NO_PROXY: 'localhost,127.0.0.1,::1', no_proxy: 'localhost,127.0.0.1,::1',
+  };
+  const argList = extraArgs.concat(splitArgs(payload.args));
+  const workDir = payload.cwd && fs.existsSync(payload.cwd) ? payload.cwd : undefined;
+  const ext = path.extname(raw).toLowerCase();
+
+  try {
+    let stat = null;
+    try { stat = fs.statSync(raw); } catch (_) {}
+    if (stat && stat.isDirectory()) {
+      return { ok: true, mode: 'folder', proxied: false };
+    }
+
+    // exe：环境变量 + Chromium 系追加 --proxy-server
+    if (SPAWN_EXTS.includes(ext)) {
+      const finalArgs = argList.slice();
+      if (CHROMIUM_PROXY_EXES.includes(path.basename(raw).toLowerCase())) {
+        finalArgs.push('--proxy-server=' + proxyUrl, '--proxy-bypass-list=<local>');
+        // 浏览器已在运行时 --proxy-server 会被忽略（新窗口交给旧进程），
+        // 用专用用户数据目录强制独立实例，保证代理参数真正生效
+        const profileName = path.basename(raw, path.extname(raw)).toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        const proxyProfile = path.join(app.getPath('userData'), 'proxy-profiles', profileName);
+        try { fs.mkdirSync(proxyProfile, { recursive: true }); } catch (_) {}
+        finalArgs.push('--user-data-dir=' + proxyProfile, '--no-first-run', '--no-default-browser-check');
+      }
+      const child = spawn(raw, finalArgs, { detached: true, stdio: 'ignore', cwd: workDir, env });
+      child.on('error', (err) => console.error('[launch-proxy]', err));
+      child.unref();
+      return { ok: true, mode: 'exe', proxied: true, port };
+    }
+
+    // .lnk / 脚本 / 其他文件：通过 cmd start 启动，让子进程继承代理环境变量
+    const child = spawn('cmd.exe', ['/c', 'start', '', '"' + raw + '"'], {
+      detached: true, stdio: 'ignore', windowsHide: true, cwd: workDir, env,
+    });
+    child.on('error', (err) => console.error('[launch-proxy]', err));
+    child.unref();
+    return { ok: true, mode: 'shell', proxied: true, port };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+}
+
+ipcMain.handle('target:launch-proxy', async (_e, payload) => {
+  try {
+    return await launchTargetProxied(payload);
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+});
 
 ipcMain.handle('target:launch', async (_e, payload) => {
   try {
@@ -1126,6 +1530,156 @@ ipcMain.handle('icon:favicon-from-page', async (_e, pageUrl) => {
 
 ipcMain.handle('app:version', async () => app.getVersion());
 
+/* --------------------------------- 自动更新 -------------------------------- */
+
+// 通过 electron-updater 从 GitHub Releases 检查 / 下载 / 安装新版本。
+// NSIS 安装包附带 .blockmap 时，electron-updater 会自动走差量（增量）下载，
+// 差量不可用（如首次安装、blockmap 缺失）时自动回落到整包下载。
+const updateHub = {
+  mod: null,
+  state: { status: 'idle', currentVersion: '', latestVersion: '', percent: 0, message: '' },
+};
+
+function sendUpdateState(patch) {
+  updateHub.state = Object.assign({}, updateHub.state, patch || {});
+  if (win && !win.isDestroyed()) win.webContents.send('update:state', updateHub.state);
+}
+
+// 自动更新仅在 electron-builder 打包后的安装版中可用
+function updateUnsupportedReason() {
+  if (!app.isPackaged) return '开发模式（npm start）不支持自动更新，请使用安装版';
+  return '';
+}
+
+function getUpdater() {
+  if (updateHub.mod) return updateHub.mod;
+  const { autoUpdater } = require('electron-updater');
+  updateHub.mod = autoUpdater;
+  autoUpdater.autoDownload = false;        // 检查到新版本后显式调用 downloadUpdate（可走增量）
+  autoUpdater.autoInstallOnAppQuit = true; // 用户不立即重启时，退出后自动安装
+
+  // 兜底：未生成 app-update.yml 的构建（如 --dir 打包）显式指定 GitHub 源
+  try {
+    const cfgFile = path.join(process.resourcesPath, 'app-update.yml');
+    if (!fs.existsSync(cfgFile)) {
+      autoUpdater.setFeedURL({ provider: 'github', owner: 'Muzi2333', repo: 'personal-workbench' });
+    }
+  } catch (_) {}
+
+  autoUpdater.on('checking-for-update', () => {
+    sendUpdateState({ status: 'checking', message: '正在检查更新…' });
+  });
+  autoUpdater.on('update-available', (info) => {
+    sendUpdateState({ status: 'available', latestVersion: info.version, message: '发现新版本 v' + info.version });
+  });
+  autoUpdater.on('update-not-available', (info) => {
+    sendUpdateState({ status: 'idle', percent: 0, message: '已是最新版本' + (info && info.version ? ' v' + info.version : '') });
+  });
+  autoUpdater.on('download-progress', (p) => {
+    const pct = Math.round(p.percent || 0);
+    sendUpdateState({ status: 'downloading', percent: pct, message: '正在下载 v' + (updateHub.state.latestVersion || '') + '（' + pct + '%）' });
+  });
+  autoUpdater.on('update-downloaded', (info) => {
+    sendUpdateState({ status: 'downloaded', latestVersion: info.version, percent: 100, message: '新版本 v' + info.version + ' 已下载，重启后安装' });
+  });
+  autoUpdater.on('error', (err) => {
+    const kind = classifyUpdateError(err);
+    sendUpdateState({ status: 'error', message: updateErrorText(kind, err && err.message ? err.message : err) });
+  });
+  return autoUpdater;
+}
+
+// electron-updater 在独立 session('electron-updater') 上用 Electron net.request，
+// 既不读 autoUpdater.proxy 属性、也不继承 defaultSession 代理、也不读 env。
+// 必须手动在它那个 session 上 setProxy，否则永远裸连 GitHub。
+async function applyUpdaterProxy(u) {
+  try {
+    const { session } = require('electron');
+    const s = session.fromPartition('electron-updater', { cache: false });
+    const cur = proxyManager && proxyManager.getState();
+    const port = (cur && cur.port) || 7890;
+    const running = !!(cur && cur.running);
+    // Chromium 代理规则字符串，同时让 http/https 都走本地 mixed-port
+    const rules = running
+      ? 'http=http://127.0.0.1:' + port + ';https=http://127.0.0.1:' + port
+      : 'direct://';
+    await s.setProxy({ mode: 'fixed_servers', proxyRules: rules });
+    console.log('[updater-proxy]', running ? 'on → ' + rules : 'off');
+  } catch (e) {
+    console.error('[updater-proxy] apply failed', e);
+  }
+}
+
+// 按失败原因给出简短、可操作的提示文案
+function updateErrorText(kind, message) {
+  if (kind === 'network') return 'GitHub 访问失败，建议重试或开启代理后再试';
+  if (kind === 'notfound') return '没有找到新版本（GitHub 暂无可用发布）';
+  if (kind === 'unsupported') return message || '当前版本不支持自动更新';
+  return '更新失败：' + String(message || '未知错误').slice(0, 120);
+}
+// 区分更新失败原因：GitHub 上无发布（404） / 网络访问失败 / 其他
+function classifyUpdateError(err) {
+  const code = String((err && (err.code || err.statusCode)) || '');
+  const msg = String(err && err.message ? err.message : err);
+  const all = msg + ' ' + code;
+  if (code === '404' || /\b404\b/.test(all) || /not found|no published versions|latest\.yml/i.test(all)) {
+    return 'notfound';
+  }
+  if (/ERR_CONNECTION|ERR_NETWORK|ERR_TIMED_OUT|ERR_INTERNET|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|socket hang up|network|proxy|aborted|timeout/i.test(all)) {
+    return 'network';
+  }
+  return 'other';
+}
+
+ipcMain.handle('update:check', async () => {
+  const reason = updateUnsupportedReason();
+  if (reason) return { ok: false, errorKind: 'unsupported', error: reason };
+  sendUpdateState({ status: 'checking', percent: 0, message: '正在检查更新…' });
+  try {
+    const u = getUpdater();
+    await applyUpdaterProxy(u);
+    const res = await u.checkForUpdates();
+    const info = res && res.updateInfo;
+    const current = app.getVersion();
+    const latest = (info && info.version) || current;
+    sendUpdateState({ currentVersion: current, latestVersion: latest });
+    return { ok: true, currentVersion: current, latestVersion: latest, available: latest !== current };
+  } catch (err) {
+    const errorKind = classifyUpdateError(err);
+    const message = updateErrorText(errorKind, err && err.message ? err.message : err);
+    sendUpdateState({ status: 'error', message });
+    return { ok: false, errorKind, error: message };
+  }
+});
+
+ipcMain.handle('update:download', async () => {
+  const reason = updateUnsupportedReason();
+  if (reason) return { ok: false, error: reason };
+  try {
+    const u = getUpdater();
+    applyUpdaterProxy(u);
+    await u.downloadUpdate();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+});
+
+ipcMain.handle('update:install', async () => {
+  const reason = updateUnsupportedReason();
+  if (reason) return { ok: false, error: reason };
+  try {
+    const u = getUpdater();
+    if (updateHub.state.status !== 'downloaded') return { ok: false, error: '请先下载更新' };
+    sendUpdateState({ status: 'installing', message: '正在重启安装…' });
+    // isSilent=false（显示安装界面） / isForceRunAfter=true（安装后自动启动）
+    setImmediate(() => u.quitAndInstall(false, true));
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+});
+
 /* --------------------------------- 窗口控制 -------------------------------- */
 
 ipcMain.on('window:minimize', () => win && win.minimize());
@@ -1145,5 +1699,119 @@ ipcMain.handle('edge-snap:set', async (_e, enabled) => {
 
 ipcMain.handle('edge-snap:get', async () => ({ ok: true, enabled: EDGE_SNAP.enabled }));
 
+// 读取 Edge 浏览器本地书签（间接同步 Edge 账号收藏夹：若 Edge 已登录微软账号并开启同步，
+// 本地 Bookmarks 文件已是云端同步结果）。扫描 User Data 下所有 Profile，合并去重。
+ipcMain.handle('edge:read-bookmarks', async () => {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const userData = process.env.LOCALAPPDATA
+    ? path.join(process.env.LOCALAPPDATA, 'Microsoft', 'Edge', 'User Data')
+    : path.join(os.homedir(), 'AppData', 'Local', 'Microsoft', 'Edge', 'User Data');
+  if (!fs.existsSync(userData)) return { ok: false, reason: 'edge-not-installed' };
+
+  // 递归把书签树拍平成 { title, url, folder }
+  const flatten = (nodes, folder, out) => {
+    if (!Array.isArray(nodes)) return out;
+    for (const n of nodes) {
+      if (!n) continue;
+      if (n.type === 'folder') {
+        flatten(n.children, (folder ? folder + ' / ' : '') + (n.name || '书签'), out);
+      } else if (n.type === 'url' && n.url) {
+        out.push({ title: n.name || n.url, url: n.url, folder: folder || '书签' });
+      }
+    }
+    return out;
+  };
+
+  const seen = new Set();
+  const result = [];
+  try {
+    const dirs = fs.readdirSync(userData, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && (d.name === 'Default' || /^Profile \d+$/.test(d.name)))
+      .map((d) => d.name);
+    for (const dir of dirs) {
+      const file = path.join(userData, dir, 'Bookmarks');
+      if (!fs.existsSync(file)) continue;
+      let data;
+      try { data = JSON.parse(fs.readFileSync(file, 'utf-8')); } catch (_) { continue; }
+      const roots = (data && data.roots) || {};
+      for (const key of ['bookmark_bar', 'other', 'synced']) {
+        const root = roots[key];
+        if (root && root.children) {
+          flatten(root.children, root.name || (key === 'bookmark_bar' ? '书签栏' : key === 'other' ? '其他书签' : '移动设备书签'), result);
+        }
+      }
+    }
+  } catch (e) {
+    return { ok: false, reason: 'read-error', message: String(e && e.message || e) };
+  }
+  // 按 url 去重，保留首次出现
+  const deduped = [];
+  for (const item of result) {
+    if (seen.has(item.url)) continue;
+    seen.add(item.url);
+    deduped.push(item);
+  }
+  return { ok: true, bookmarks: deduped };
+});
+
 // 窗口被用户拖出收起态后可以显式调用：从当前位置重新判断是否要吸边
 ipcMain.on('edge-snap:reevaluate', () => { snapToEdge(); });
+
+/* --------------------------------- 代理（mihomo 内核） --------------------------------- */
+
+const pmCall = (fn) => async (...args) => {
+  if (!proxyManager) return { ok: false, error: '代理模块未就绪' };
+  try {
+    return await proxyManager[fn](...args.slice(1));
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+};
+
+ipcMain.handle('proxy:get-state', pmCall('getState'));
+ipcMain.handle('proxy:download-core', pmCall('downloadCore'));
+ipcMain.handle('proxy:pick-core', pmCall('pickCore'));
+ipcMain.handle('proxy:start', pmCall('startCore'));
+ipcMain.handle('proxy:stop', pmCall('stopCore'));
+ipcMain.handle('proxy:add-sub', pmCall('addSubscription'));
+ipcMain.handle('proxy:refresh-sub', pmCall('refreshSubscription'));
+ipcMain.handle('proxy:delete-sub', pmCall('deleteSubscription'));
+ipcMain.handle('proxy:use-sub', pmCall('useSubscription'));
+ipcMain.handle('proxy:set-sysproxy', pmCall('setSysProxy'));
+ipcMain.handle('proxy:set-selfproxy', pmCall('setSelfProxy'));
+// 一键以管理员身份重启并自动开启 TUN（UAC 弹窗由系统处理）
+ipcMain.handle('proxy:relaunch-admin-tun', async () => {
+  if (process.platform !== 'win32') return { ok: false, error: '仅支持 Windows' };
+  try {
+    const exe = process.execPath.replace(/'/g, "''");
+    // Start-Process -Verb RunAs 触发 UAC；--force-admin 阻止自动降级，--enable-tun 让新实例自动开 TUN
+    const ps = spawn('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command',
+      "Start-Process -Verb RunAs -FilePath '" + exe + "' -ArgumentList '--force-admin','--enable-tun'",
+    ], { detached: true, stdio: 'ignore', windowsHide: true });
+    ps.on('error', () => {});
+    ps.unref();
+    // 给 UAC/新实例留出启动时间后退出当前（非管理员）实例，避免双开抢内核端口
+    setTimeout(() => { app.quit(); }, 1200);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
+
+ipcMain.handle('proxy:set-auto-start', pmCall('setAutoStart'));
+ipcMain.handle('proxy:set-auto-self', pmCall('setAutoSelfProxy'));
+ipcMain.handle('proxy:set-tun', pmCall('setTun'));
+ipcMain.handle('proxy:set-mode', pmCall('setMode'));
+ipcMain.handle('proxy:set-node-keywords', pmCall('setNodeKeywords'));
+ipcMain.handle('proxy:get-proxies', pmCall('getProxies'));
+ipcMain.handle('proxy:select', pmCall('selectNode'));
+ipcMain.handle('proxy:test-delay', pmCall('testDelay'));
+ipcMain.handle('proxy:test-group', pmCall('testGroup'));
+ipcMain.handle('proxy:test-delay-url', pmCall('testDelayUrl'));
+ipcMain.handle('proxy:fetch-ip', pmCall('fetchIpInfo'));
+ipcMain.handle('proxy:get-traffic', pmCall('getTraffic'));
+ipcMain.handle('proxy:lite-status', pmCall('getLiteStatus'));
